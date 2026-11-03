@@ -28,7 +28,7 @@ npm.cmd run release:windows
 
 ## 创建 Release
 
-仓库已配置 `.github/workflows/release.yml`：`main` 收到 `u-study/package.json` 或发布工作流的变更时，自动运行测试、构建便携包并创建与版本号对应的 Release。也可在 Actions 页面手动运行。已有同版本 Release 时会停止，避免覆盖；发布下一版前先更新版本号。工作流仅在仓库当前可见性范围内发布，不修改 Private / Public 设置。
+仓库已配置 `.github/workflows/release.yml`：`main` 收到 `u-study/package.json`、锁文件或发布工作流的变更时，自动运行测试、构建便携包并创建与版本号对应的 Release。也可在 Actions 页面手动运行。已有同版本 Release 时会停止，避免覆盖；发布下一版前先更新版本号。工作流仅在仓库当前可见性范围内发布，不修改 Private / Public 设置。
 
 需要手动发布时：
 

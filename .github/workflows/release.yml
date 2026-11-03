@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - u-study/package.json
+      - u-study/package-lock.json
       - .github/workflows/release.yml
 
 permissions:
