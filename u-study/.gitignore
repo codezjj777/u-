@@ -1,0 +1,12 @@
+.cache/
+.sites-runtime/
+node_modules/
+*.zip
+*.tar.gz
+.runtime/
+.openai/
+
+
+*.tgz
+__pycache__/
+*.pyc

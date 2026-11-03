@@ -1,0 +1,10 @@
+import { readFile, stat, readdir } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import {buildCore} from './build-core.mjs';
+await buildCore();
+const scripts=[...(await readdir('.')).filter(name=>name.endsWith('.mjs')),...(await readdir('shared')).filter(name=>name.endsWith('.mjs')).map(name=>'shared/'+name),...(await readdir('dist')).filter(name=>name.endsWith('.js')).map(name=>'dist/'+name)];
+for(const file of scripts)execFileSync(process.execPath,['--check',file],{stdio:'inherit'});
+const html=await readFile('dist/index.html','utf8');
+for(const asset of ['styles.css','core.js','service.js','task-view.js','app.js','favicon.svg','question-bank.example.json'])await stat('dist/'+asset);
+if(/chrome\.runtime|u-study-extension|浏览器扩展读取|加载解压缩/.test(html))throw new Error('页面仍包含已移除的扩展方案。');
+console.log('构建验证通过：本地程序和全部页面资源已就绪。');

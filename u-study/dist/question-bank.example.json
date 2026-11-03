@@ -1,0 +1,48 @@
+[
+  {
+    "question": "If I had known about the meeting, I ____ attended it.",
+    "options": [
+      "will have",
+      "would have",
+      "had",
+      "have"
+    ],
+    "answer": [
+      "would have"
+    ],
+    "explanation": "过去事实的虚拟条件句：If + had done，主句用 would have done。答案使用选项原文，避免选项顺序改变。",
+    "type": "single"
+  },
+  {
+    "question": "Choose the synonyms of important.",
+    "options": [
+      "significant",
+      "trivial",
+      "essential",
+      "irrelevant"
+    ],
+    "answer": [
+      "significant",
+      "essential"
+    ],
+    "explanation": "多选题将多个答案写在 answer 数组中。",
+    "type": "multiple"
+  },
+  {
+    "question": "She has been learning English ____ five years.",
+    "answer": [
+      "for"
+    ],
+    "explanation": "填空题可省略 options，多个空格按页面顺序填写。",
+    "type": "text"
+  },
+  {
+    "question": "What does the writer recommend?",
+    "type": "text",
+    "context": "The writer recommends walking to school to stay active.",
+    "answer": [
+      "Walking to school."
+    ],
+    "explanation": "材料相关题必须提供与页面一致的 context；可选 scope 用于限定课程或单元。"
+  }
+]

@@ -1,0 +1,34 @@
+# Local credentials, account data, browser profiles and caches
+.runtime/
+.cache/
+.openai/
+.sites-runtime/
+.aws/
+.ssh/
+
+# Installed dependencies and Python bytecode
+node_modules/
+__pycache__/
+*.py[cod]
+
+# Local environment files (sanitized examples may be committed)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs, archives and Windows-specific local files
+*.log
+*.log.*
+*.zip
+*.tar.gz
+*.tgz
+*.lnk
+Thumbs.db
+Desktop.ini
+
+# Local development notes contain machine-specific paths and session history
+u-study/项目优化方案.md
+u-study/优化实施记录.md
+u-study/答题流程核对.md
+u-study/extension/

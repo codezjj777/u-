@@ -1,0 +1,18 @@
+export function vocabularyHTML({total=59,initial=0,title='New words',mode='normal',delayMs=25}={}){
+  const words=Array.from({length:total},(_,i)=>i===0?'avenue':'word '+(i+1)),kind=title==='Phrases'?'短语':title==='Proper nouns'?'专有名词':'生词';
+  return `<!doctype html><html><body><style>
+    body{font:15px Arial}.swiper-vocabulary{width:420px;overflow:hidden}.swiper-wrapper{display:flex;transition:transform .05s;transform:translateX(-${initial*420}px)}.swiper-vocabulary-slide{width:420px;flex-shrink:0}.vocWord{background:#0089dc;color:white;padding:35px}.vocActions{display:flex;gap:20px}.action{padding:10px;background:#ddd;cursor:pointer}.disabled{opacity:.4}.visual-card{height:180px}
+    </style><header><div class="pc-break-crumb"><span class="pc-break-crumb-text">English Book</span><span class="pc-break-crumb-text">Horns of a dilemma</span><span class="pc-break-crumb-text">Reading in detail</span></div><div class="pc-header-tab-activity">Vocabulary</div><div class="pc-task pc-header-task-activity">${title}</div></header>
+    <main class="layout-container"><div class="question-vocabulary"><div class="vocabulary-wrapper"><div class="progressBar"><div class="progress-wrapper"><div class="progress"><div class="current"></div></div><div class="ratio"><span>${Math.min(initial+1,total)}</span><span>/${total}</span></div></div></div><div class="vocContainer"><div class="vocInfo"><div class="swiper-container swiper-vocabulary swiper-no-swiping"><div class="swiper-wrapper">
+    ${words.map((word,i)=>`<div class="swiper-slide swiper-vocabulary-slide${i===initial?' swiper-slide-active':''}"><div class="vocabulary"><div class="question-vocabulary-base"><div class="vocWord">${word}</div><div class="soundWrap"><span class="sound">播放读音</span></div></div><div class="vocabularyIntro"><div class="question-vocabulary-intro"><div class="exp">释义 ${i===0?'n. 大街':'Meaning '+(i+1)}</div><div class="practice"><span class="practice-recorder">录音准备</span></div></div></div></div></div>`).join('')}
+    <div class="swiper-slide swiper-vocabulary-slide${initial===total?' swiper-slide-active':''}"><div class="visual-card"><span>已学完全部${total}个${kind}啦！</span></div></div></div></div></div><div class="vocActions"><div class="action prev disabled">上一个</div><div class="action next${initial===total?' disabled':''}">下一个</div><div class="action auto">自动播放</div></div></div></div></div></main>
+    <script>
+    window.nextClicks=0;window.autoClicks=0;window.recordClicks=0;window.submitClicks=0;window.cardIndex=${initial};window.vocabularyFinished=${initial===total};
+    const total=${total},mode=${JSON.stringify(mode)},slides=[...document.querySelectorAll('.swiper-vocabulary-slide')],next=document.querySelector('.action.next');
+    document.querySelector('.action.auto').onclick=()=>window.autoClicks++;document.querySelector('.practice-recorder').onclick=()=>window.recordClicks++;
+    function show(index){window.cardIndex=index;slides.forEach((slide,i)=>slide.classList.toggle('swiper-slide-active',i===index));document.querySelector('.ratio').innerHTML='<span>'+Math.min(index+1,total)+'</span><span>/'+total+'</span>';document.querySelector('.swiper-wrapper').style.transform='translateX(-'+index*420+'px)';if(index===total){window.vocabularyFinished=true;next.classList.add('disabled');}}
+    next.onclick=()=>{if(next.classList.contains('disabled'))return;window.nextClicks++;if(mode==='stall')return;
+      if(mode==='tab-change'){document.querySelector('.pc-header-task-activity').textContent='Phrases';return;}
+      setTimeout(()=>{let target=window.cardIndex+(mode==='jump'?2:1);if(mode==='no-completion'&&target===total)return;show(Math.min(target,total));},${delayMs});};
+    </script></body></html>`;
+}

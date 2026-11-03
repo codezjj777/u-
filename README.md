@@ -75,4 +75,3 @@ npm.cmd run release:windows    # Windows x64 便携版 .zip
 ```
 
 输出位于 `u-study/.cache/releases/`。便携版构建从 Node.js 官方站点下载固定版本运行时并核对官方 SHA-256，按锁文件安装生产依赖。具体步骤见 [发布说明](docs/RELEASING.md)。
-

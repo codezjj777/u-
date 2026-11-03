@@ -1,0 +1,77 @@
+name: Build and release Windows portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - u-study/package.json
+      - .github/workflows/release.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: u-study/package-lock.json
+      - name: Install development dependencies
+        working-directory: u-study
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run local tests and validate build
+        working-directory: u-study
+        run: |
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and verify portable package
+        working-directory: u-study
+        run: npm run release:windows
+      - name: Keep verified build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: U-Study-windows-x64
+          path: |
+            u-study/.cache/releases/*-windows-x64.zip
+            u-study/.cache/releases/*.tgz
+            u-study/.cache/releases/SHA256SUMS.txt
+            u-study/.cache/releases/windows-manifest.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+      - name: Publish private repository release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content u-study/package.json -Raw | ConvertFrom-Json).version
+          $tag = "v$version"
+          $repo = $env:GITHUB_REPOSITORY
+          $existing = gh release view $tag --repo $repo --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists. Bump the version before publishing another release." }
+          $assets = @(
+            "u-study/.cache/releases/U-Study-$version-windows-x64.zip",
+            "u-study/.cache/releases/u-study-workspace-$version.tgz",
+            'u-study/.cache/releases/SHA256SUMS.txt',
+            'u-study/.cache/releases/windows-manifest.json'
+          )
+          gh release create $tag @assets --repo $repo --target $env:GITHUB_SHA --title "U Study v$version" --notes-file .github/release-notes.md --draft
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit $tag --repo $repo --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
