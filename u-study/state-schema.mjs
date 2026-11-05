@@ -12,7 +12,7 @@ export function validateManualEntryMarks(entries=[]){
   if(!Array.isArray(entries)||entries.length>10000)throw new Error('手动项目标记格式异常。');
   return entries.map(entry=>{
     if(!object(entry)||!text(entry.courseId,2000)||!entry.courseId||!text(entry.unitId,200)||!entry.unitId||!text(entry.entryKey,5000)||!entry.entryKey||!text(entry.label,5000)||!text(entry.questionSelector,500)||!['no-fillable-questions','oral-only'].includes(entry.reason)||!timestamp(entry.markedAt))throw new Error('手动项目标记格式异常。');
-    if(entry.handler!==undefined&&!['vocabulary-cards-v1','video-view-v1','question-controls-v2','question-controls-v3','question-controls-v4','oral-retell-v1','oral-recording-v2','roleplay-v1'].includes(entry.handler))throw new Error('手动项目处理器版本异常。');
+    if(entry.handler!==undefined&&!['vocabulary-cards-v1','video-view-v1','question-controls-v2','question-controls-v3','question-controls-v4','question-controls-v5','oral-retell-v1','oral-recording-v2','roleplay-v1'].includes(entry.handler))throw new Error('手动项目处理器版本异常。');
     const {courseId,unitId,entryKey,label,questionSelector,reason,markedAt}=entry;return {courseId,unitId,entryKey,label,questionSelector,reason,markedAt,...(entry.handler?{handler:entry.handler}:{})};
   });
 }

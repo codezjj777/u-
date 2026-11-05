@@ -20,7 +20,7 @@
   function createClient({fetchImpl=(...args)=>fetch(...args),EventSourceImpl=globalThis.EventSource,location=globalThis.location,onState=()=>{},onNotice=()=>{},onConnectionChange=()=>{},schedule=setTimeout,cancel=clearTimeout,retryDelay=1500,requestTimeout=65000,probeTimeout=4000}={}){
     const localPage=location?.protocol==='http:'&&['127.0.0.1','localhost'].includes(location?.hostname);
     const wrongPage=`当前页面未连接到 U Study 本地服务，请从 ${LOCAL_URL} 打开工作台。`;
-    let online=false,reported=null,stopped=true,stream=null,retryTimer=null,nextDelay=retryDelay,connecting=null,generation=0,lifetime=new AbortController(),probe=null,snapshot=null;
+    let online=false,reported=null,stopped=true,stream=null,retryTimer=null,nextDelay=retryDelay,connecting=null,generation=0,lifetime=new AbortController(),probe=null,snapshot=null,shutdownResponse=null,shutdownPending=null;
     function accept(value){
       if(snapshot&&value.instanceId===snapshot.instanceId&&Number.isInteger(value.revision)&&value.revision<snapshot.revision)return snapshot;
       snapshot=value;setOnline(true);onState(value);return value;
@@ -104,7 +104,36 @@
       stopped=true;generation++;lifetime.abort();probe?.abort();connecting=null;probe=null;
       if(retryTimer!==null)cancel(retryTimer);retryTimer=null;stream?.close();stream=null;setOnline(false);
     }
-    return Object.freeze({start,stop,request,ensureConnected,isConnected:()=>online});
+    function shutdown({signal,onProgress=()=>{},timeoutMs=25000,pollMs=250}={}){
+      if(shutdownPending)return shutdownPending;
+      const pending=(async()=>{
+        if(!shutdownResponse){
+          onProgress('saving');
+          const result=await request('/shutdown',{},'POST',signal);
+          if(result?.accepted!==true)throw new Error('后台尚未确认退出请求，请重试。');
+          shutdownResponse=result;stop();
+        }
+        onProgress('stopping');let refused=0;const deadline=Date.now()+timeoutMs,instanceId=snapshot?.instanceId;
+        while(Date.now()<deadline){
+          signal?.throwIfAborted();
+          try{
+            const response=await fetchImpl('/api/health',{method:'GET',cache:'no-store',redirect:'error',signal:AbortSignal.any([AbortSignal.timeout(probeTimeout),...(signal?[signal]:[])])});
+            refused=0;
+            if(response.ok){
+              const health=await response.json();
+              if(health?.app!=='u-study'||instanceId&&health.instanceId&&health.instanceId!==instanceId)throw Object.assign(new Error('检测到程序已重新启动，请刷新工作台后再退出。'),{code:'SERVICE_RESTARTED'});
+            }
+          }catch(error){
+            signal?.throwIfAborted();if(error.code==='SERVICE_RESTARTED')throw error;
+            if(error.name==='TypeError'){if(++refused>=2)return shutdownResponse;}else refused=0;
+          }
+          if(pollMs>0)await new Promise(resolve=>setTimeout(resolve,pollMs));
+        }
+        throw Object.assign(new Error('尚未确认后台退出，请重试退出，或运行「一键停止.cmd」。'),{code:'SHUTDOWN_TIMEOUT'});
+      })().finally(()=>{if(shutdownPending===pending)shutdownPending=null;});
+      shutdownPending=pending;return pending;
+    }
+    return Object.freeze({start,stop,request,shutdown,ensureConnected,isConnected:()=>online});
   }
   globalThis.UStudyService=Object.freeze({createClient,LOCAL_URL,applyPatch});
 })();

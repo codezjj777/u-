@@ -5,6 +5,27 @@ import '../dist/service.js';
 const state=()=>({courses:[],tasks:[],activity:[],settings:{aiEnabled:false},bankCount:0,connected:false,windowOpen:false,lastSynced:null,keyPresent:false});
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
 
+test('safe exit posts once, waits for service disappearance and stops automatic reconnection',async t=>{
+  const calls=[];let probes=0;
+  const f=fixture(t,async(url,options)=>{calls.push({url,options});if(url==='/api/state')return json({...state(),instanceId:'same'});if(url==='/api/shutdown')return json({accepted:true,saved:true},202);if(++probes===1)return json({app:'u-study',instanceId:'same',closing:true});throw new TypeError('connection refused');});
+  await f.client.start();const phases=[];const first=f.client.shutdown({pollMs:0,onProgress:phase=>phases.push(phase)}),second=f.client.shutdown({pollMs:0});assert.equal(first,second);
+  assert.deepEqual(await first,{accepted:true,saved:true});assert.equal(calls.filter(call=>call.url==='/api/shutdown').length,1);assert.equal(probes,3);assert.deepEqual(phases,['saving','stopping']);assert.equal(f.streams.every(stream=>stream.closed),true);assert.equal(f.client.isConnected(),false);assert.equal(f.timers.size,0);f.streams[0].emit('error');assert.equal(f.timers.size,0);
+});
+test('safe exit times out while the backend is alive and a later verification does not send another shutdown',async t=>{
+  let closed=false,posts=0;
+  const f=fixture(t,async url=>{if(url==='/api/state')return json(state());if(url==='/api/shutdown'){posts++;return json({accepted:true,saved:true},202);}if(closed)throw new TypeError('connection refused');return json({app:'u-study'});});
+  await f.client.start();await assert.rejects(f.client.shutdown({timeoutMs:8,pollMs:1}),{code:'SHUTDOWN_TIMEOUT'});assert.equal(posts,1);closed=true;await f.client.shutdown({pollMs:0});assert.equal(posts,1);
+});
+test('safe exit never mistakes an unresponsive or restarted service for an exited process',async t=>{
+  for(const restarted of [false,true]){
+    const f=fixture(t,async url=>{if(url==='/api/state')return json({...state(),instanceId:'old'});if(url==='/api/shutdown')return json({accepted:true,saved:true},202);if(restarted)return json({app:'u-study',instanceId:'new'});throw new DOMException('probe timed out','TimeoutError');});
+    await f.client.start();await assert.rejects(f.client.shutdown({timeoutMs:8,pollMs:1}),{code:restarted?'SERVICE_RESTARTED':'SHUTDOWN_TIMEOUT'});
+  }
+});
+test('a failed data save leaves the service connected and never reports a successful safe exit',async t=>{
+  const f=fixture(t,async url=>url==='/api/state'?json(state()):json({error:'数据未能保存到磁盘。'},507));await f.client.start();await assert.rejects(f.client.shutdown({pollMs:0}),error=>error.status===507);assert.equal(f.client.isConnected(),true);assert.equal(f.streams[0].closed,false);
+});
+
 function fixture(t,fetchImpl,options={}){
   const streams=[],timers=new Map(),changes=[],states=[];let serial=0;
   class Stream{

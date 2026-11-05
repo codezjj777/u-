@@ -1,0 +1,22 @@
+export const answerBlockerAnswers=['track','latest','positive','set'];
+export function answerBlockerHTML({mode='study',kind='custom'}={}){
+  const choices=[['trace','track'],['latest','future'],['passive','positive'],['decide','set']],titles=["Companies should ____ trends.",'Keep up with the ____ trends.','A ____ trend in sales.','Companies ____ the trends for others.'];
+  const questions=choices.map((values,i)=>kind==='custom'?`<div class="question-common-abs-choice"><div class="ques-title">${i+1}. ${titles[i]}</div><div class="option-wrap">${values.map((text,j)=>`<div class="option isNotReview" id="q${i}o${j}" data-answer="${text}"><span class="caption">${String.fromCharCode(65+j)}</span><div class="content">${text}</div></div>`).join('')}</div></div>`:`<fieldset><legend>${i+1}. ${titles[i]}</legend>${kind==='text'?`<input id="answer-${i}" type="text">`:values.map((text,j)=>`<label><input id="q${i}o${j}" type="radio" name="q${i}" value="${text}">${text}</label>`).join('')}</fieldset>`).join('');
+  return `<!doctype html><html><head><meta charset="utf-8"><style>body{font:16px Arial;margin:25px}.option{padding:12px;margin:4px;width:500px;border:1px solid #ddd;cursor:pointer}.option.selected{background:#cdf}.caption{display:inline-block;margin-right:16px}.content{display:inline-block}.ant-modal-wrap{position:fixed;inset:0;z-index:1000;background:#0006}.ant-modal{width:430px;margin:150px auto;padding:25px;background:white;border-radius:8px}button{padding:12px}input[type=text]{width:300px;height:30px}</style></head><body>
+  <header><div class="pc-break-crumb"><span class="pc-break-crumb-text">English Book</span><span class="pc-break-crumb-text">Landing your dream job</span><span class="pc-break-crumb-text">Language in focus</span></div><div class="pc-header-tab-activity">Language in focus</div><div class="pc-task pc-header-task-activity">Collocations</div></header>
+  <main id="exercise" class="pc-main-container"><div class="layout-container"><div class="abs-direction">Complete the sentences by choosing suitable words.</div>${questions}</div></main><footer><button id="submit">提交</button></footer>
+  <script>
+    window.acks=0;window.dangerCalls=0;window.selectionClicks=[];window.submissions=[];window.fieldWrites=[0,0,0,0];
+    window.showBlocker=()=>{
+      if(document.querySelector('.ant-modal-wrap'))return;
+      const wrapper=document.createElement('div');wrapper.className='ant-modal-wrap';wrapper.innerHTML='<div class="ant-modal" role="dialog">'+(${JSON.stringify(mode)}==='study'?'<p>本单元学习时间：无限制</p><p>是否必修：必修</p><button id="ack">我知道了</button>':'<p>确认清空当前答案？</p><button id="danger">确认</button><button id="close-modal">关闭弹窗</button>')+'</div>';document.body.append(wrapper);
+      if(${JSON.stringify(mode)}==='study')wrapper.querySelector('#ack').onclick=()=>{window.acks++;wrapper.querySelector('.ant-modal').style.display='none';};
+      else{wrapper.querySelector('#danger').onclick=()=>window.dangerCalls++;wrapper.querySelector('#close-modal').onclick=()=>wrapper.remove();if(${JSON.stringify(mode)}==='ghost')wrapper.querySelector('.ant-modal').style.display='none';}
+    };
+    window.armBlocker=(selector,event='pointerenter',parent=false)=>document.querySelector(selector).addEventListener(event,()=>{(parent?window.parent:window).showBlocker();},{once:true});
+    document.querySelectorAll('.option').forEach(option=>option.onclick=event=>{window.selectionClicks.push({answer:option.dataset.answer,trusted:event.isTrusted});option.parentElement.querySelectorAll('.option').forEach(el=>el.classList.remove('selected'));option.classList.add('selected');});
+    document.querySelectorAll('input[type=radio]').forEach(input=>input.onclick=event=>window.selectionClicks.push({answer:input.value,trusted:event.isTrusted}));
+    document.querySelectorAll('input[type=text]').forEach((input,i)=>input.oninput=()=>window.fieldWrites[i]++);
+    document.querySelector('#submit').onclick=()=>{const values=${JSON.stringify(kind)}==='custom'?[...document.querySelectorAll('.option.selected')].map(el=>el.dataset.answer):${JSON.stringify(kind)}==='text'?[...document.querySelectorAll('input[type=text]')].map(el=>el.value):[...document.querySelectorAll('input:checked')].map(el=>el.value);window.submissions.push(values);document.querySelector('#exercise').innerHTML='<h2>答题小结</h2><p>共4道题，客观题4道，主观题0道</p><p>正确 (4/4)</p><p>错误 (0/4)</p><p>未作答 0</p>';document.querySelector('footer').innerHTML='';};
+  </script></body></html>`;
+}

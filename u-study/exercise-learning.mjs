@@ -8,7 +8,7 @@ const bridges=new WeakMap();
 // values, generated element IDs or browser locators.
 export function capturePageIdentity(questions){
   const clean=value=>String(value??'').normalize('NFKC').replace(/\s+/g,' ').trim();
-  return JSON.stringify(questions.map(q=>[clean(q.question),q.type,(q.options||[]).map(clean),clean(q.context),(q.wordBank||[]).map(clean),(q.targets||[]).map(field=>[field.kind,(field.choices||[]).map(choice=>[clean(choice.text),choice.value]),(field.items||[]).map(item=>[item.key,clean(item.text)])]),q.questionType||'',q.prompts,q.promptEmphasis,q.imageKeys,(q.images||[]).map(image=>[image.key,image.label])]));
+  return JSON.stringify(questions.map(q=>[clean(q.question),q.type,(q.options||[]).map(clean),clean(q.context),(q.wordBank||[]).map(clean),(q.targets||[]).map(field=>[field.kind,(field.choices||[]).map(choice=>[clean(choice.text),choice.value]),(field.items||[]).map(item=>[item.key,clean(item.text)])]),q.questionType||'',q.prompts,q.promptEmphasis,q.imageKeys,(q.images||[]).map(image=>[image.key,image.label]),clean(q.directions)]));
 }
 
 function installCaptureInDOM(collect,navigation,identity,config){
@@ -78,7 +78,7 @@ const disposeCapture=({id})=>{if(window.__ustudyExerciseCapture?.id===id)window.
 
 function packQuestion(question,answer){
   const fields=question.targets.map(({kind,key,choices,inputMode,items})=>({kind,...(key!==undefined?{key}:{}),...(choices?{choices:choices.map(choice=>({...choice}))}:{}),...(items?{items:items.map(({key,text,originalLabel})=>({key,text,...(originalLabel?{originalLabel}:{})}))}:{}),...(inputMode?{inputMode}:{})}));
-  return {question:question.question,type:question.type,options:[...(question.options||[])],context:question.context||'',wordBank:[...(question.wordBank||[])],blankOptions:question.type==='text'?fields.map(field=>field.choices?.map(choice=>choice.text)||[]):[],fields,answer:[...answer],...(question.images?.length?{images:question.images.map(image=>({digest:image.digest,label:image.label}))}:{}),...(question.type==='matching'?{prompts:[...question.prompts],promptEmphasis:question.promptEmphasis.map(words=>[...words])}:{}),...(question.id?{id:question.id}:{}),...(question.questionType?{questionType:question.questionType}:{}),...(question.mediaKeys?{mediaKeys:[...question.mediaKeys]}:{})};
+  return {question:question.question,type:question.type,options:[...(question.options||[])],context:question.context||'',...(question.directions?{directions:question.directions}:{}),wordBank:[...(question.wordBank||[])],blankOptions:question.type==='text'?fields.map(field=>field.choices?.map(choice=>choice.text)||[]):[],fields,answer:[...answer],...(question.images?.length?{images:question.images.map(image=>({digest:image.digest,label:image.label}))}:{}),...(question.type==='matching'?{prompts:[...question.prompts],promptEmphasis:question.promptEmphasis.map(words=>[...words])}:{}),...(question.id?{id:question.id}:{}),...(question.questionType?{questionType:question.questionType}:{}),...(question.mediaKeys?{mediaKeys:[...question.mediaKeys]}:{})};
 }
 
 export function fullCorrectProof(feedback,pages){

@@ -61,7 +61,7 @@ export class StudyTimeController {
     return { tasks: copy(this.storage.tasks), courses: this.courses().filter(course => isStudyTimeURL(course.url)).map(course => ({ id: course.id, title: course.title, label: studyCourseLabel(course), requiresActivation: !!course.requiresActivation })),
       catalog: this.catalog ? copy(this.catalog) : null, windowOpen: this.browser.windowOpen, operation: this.operation, storageError: this.storage.error || '',
       progress: copy(this.progressStorage.snapshot(this.courses().filter(course => isStudyTimeURL(course.url)), this.now())), progressAvailable: !!this.browser.progressAvailable,
-      dwellClock: this.dwellClock(), platformRefreshMs: this.gradePollMs, timingVersion: 2, taskCreditVersion: 2, pageReadVersion: 3, idleNoticeVersion: 2 };
+      dwellClock: this.dwellClock(), platformRefreshMs: this.gradePollMs, timingVersion: 2, taskCreditVersion: 2, pageReadVersion: 4, idleNoticeVersion: 2 };
   }
   dwellClock() {
     const task = this.active(), sample = this.clock?.previous, now = this.now(), maxAheadMs = 6000;

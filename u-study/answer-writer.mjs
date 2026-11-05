@@ -84,7 +84,7 @@ async function readTextAnswer(locator,target){
   }
   return target.kind==='editable'?locator.innerText():locator.inputValue();
 }
-async function fillDropdown(frame,locator,target,value,{signal,check}){
+async function fillDropdown(frame,locator,target,value,{signal,check,act}){
   const before=await readTextAnswer(locator,target);if(before===value)return;
   // Only the live, exercise-specific menu is eligible; hidden retained portals
   // and labels elsewhere in the document cannot become answer targets.
@@ -105,7 +105,7 @@ async function fillDropdown(frame,locator,target,value,{signal,check}){
   const labels=target.choices.map(choice=>choice.text),token=randomUUID(),option=frame.locator('[data-ustudy-dropdown-option="'+token+'"]');
   try{
     if((await frame.evaluate(menuState,{inspectOnly:true})).open)throw new Error('已有展开的下拉菜单，请关闭菜单后重试。');
-    await check();await locator.locator('.ant-dropdown-trigger.user-answer').click({timeout:5000});
+    await act(target.selector+' .ant-dropdown-trigger.user-answer',()=>locator.locator('.ant-dropdown-trigger.user-answer').click({timeout:5000}));
     let ready=false;
     for(let attempt=0;attempt<15;attempt++){
       await check();if(await readTextAnswer(locator,target)!==before)throw new Error('展开菜单时答案已被修改，已停止。');
@@ -118,7 +118,7 @@ async function fillDropdown(frame,locator,target,value,{signal,check}){
     // or match a retained portal with aria-hidden or zero-width characters.
     await check();const fresh=await frame.evaluate(menuState,{choices:labels,value,token});
     if(fresh.error||!fresh.ready||await option.count()!==1)throw new Error(fresh.error||'下拉菜单中的答案已变化或不唯一，已停止。');
-    await option.click({timeout:5000});
+    await act('[data-ustudy-dropdown-option="'+token+'"]',()=>option.click({timeout:5000}));
     let stable=0;
     for(let attempt=0;attempt<15;attempt++){
       await check();stable=await readTextAnswer(locator,target)===value?stable+1:0;if(stable>=4)return;
@@ -155,8 +155,9 @@ export async function verifyQuestion(frame,question,answer,{signal,checkpoint=as
  * @param {import('./shared/contracts.mjs').Question} question
  * @param {import('./shared/contracts.mjs').Answer} answer
  */
-export async function fillQuestion(frame,question,answer,{signal,checkpoint=async()=>{},onMatchingRecovery,textPrepared=false}={}){
+export async function fillQuestion(frame,question,answer,{signal,checkpoint=async()=>{},interact,onMatchingRecovery,textPrepared=false}={}){
   const check=async()=>{signal?.throwIfAborted();await checkpoint();signal?.throwIfAborted();};
+  const act=async(selector,operation)=>{await check();return interact?interact(frame,selector,operation):operation();};
   if(!textPrepared)answer=prepareTextAnswer(question,answer).answer;
   if(!Array.isArray(question.targets)||!question.targets.length||!Array.isArray(answer.answers)||answer.answers.some(value=>typeof value!=='string'||!value.trim()))throw new Error('题目控件或答案格式无效，已停止。');
   if(question.type==='matching')return fillMatching(frame,question,answer,{signal,checkpoint,onRecovery:onMatchingRecovery});
@@ -175,17 +176,19 @@ export async function fillQuestion(frame,question,answer,{signal,checkpoint=asyn
     await dismissInputRestriction(frame,check);
     for(const [i,target] of question.targets.entries()){
       await check();const locator=frame.locator(target.selector),value=answer.answers[i];
-      if(target.kind==='unipus-select'){await fillDropdown(frame,locator,target,value,{signal,check});continue;}
+      if(target.kind==='unipus-select'){await fillDropdown(frame,locator,target,value,{signal,check,act});continue;}
       if(!['select','editable'].includes(target.kind)&&typeof locator.getAttribute==='function'){
         const limit=await locator.getAttribute('maxlength');
         if(limit!==null&&/^\d+$/.test(limit)&&value.length>Number(limit))throw new TextInputError(`第 ${i+1} 个作答项超过页面允许的 ${limit} 字符，尚未截断或提交，请核对答案长度。`,{fieldIndex:i,code:'TEXT_INPUT_TOO_LONG'});
       }
-      if(target.kind==='select'){
-        await locator.focus({timeout:5000});await check();await locator.selectOption({value:target.choices.find(choice=>choice.text===value).value},{timeout:5000});
-      }
-      else if(target.inputMode==='keyboard'){
-        await locator.click({timeout:5000});await check();await locator.press('ControlOrMeta+A');await check();await locator.press('Backspace');await check();await locator.pressSequentially(value);await check();await locator.press('Tab');
-      }else await locator.fill(value,{timeout:5000});
+      await act(target.selector,async()=>{
+        if(target.kind==='select'){
+          await locator.focus({timeout:5000});await check();await locator.selectOption({value:target.choices.find(choice=>choice.text===value).value},{timeout:5000});
+        }
+        else if(target.inputMode==='keyboard'){
+          await locator.click({timeout:5000});await check();await locator.press('ControlOrMeta+A');await check();await locator.press('Backspace');await check();await locator.pressSequentially(value);await check();await locator.press('Tab');
+        }else await locator.fill(value,{timeout:5000});
+      });
       await check();if(typeof locator.blur==='function')await locator.blur();
       // React/Vue can revert or replace an input on blur. Check the committed
       // value as well as the immediate write, through a locator that can rebind.
@@ -205,12 +208,19 @@ export async function fillQuestion(frame,question,answer,{signal,checkpoint=asyn
     for(const [i,target] of question.targets.entries()){
       const selected=answer.indexes.includes(i);if(question.type==='single'&&!selected)continue;
       await check();const locator=frame.locator(target.selector);
-      if(target.kind==='native'){await locator.setChecked(selected,{timeout:5000});await check();}
+      if(target.kind==='native'){await act(target.selector,()=>locator.setChecked(selected,{timeout:5000}));await check();}
       else{
         const state=target.kind==='unipus-choice'?el=>el.classList.contains('selected'):selectedState;
-        if(await locator.evaluate(state)!==selected){await check();await locator.click({timeout:5000});}
         let verified=false;
-        for(let attempt=0;attempt<6;attempt++){await check();if(await locator.evaluate(state)===selected){verified=true;break;}await sleep(100,undefined,{signal});}
+        for(let clickAttempt=0;clickAttempt<2&&!verified;clickAttempt++){
+          if(await locator.evaluate(state)!==selected)await act(target.selector,async()=>{
+            // Re-read on retry: a committed choice must never be toggled off.
+            if(await locator.evaluate(state)!==selected)await locator.click({timeout:5000});
+          });
+          for(let attempt=0;attempt<6;attempt++){await check();if(await locator.evaluate(state)===selected){verified=true;break;}await sleep(100,undefined,{signal});}
+          // An ancestor dialog can swallow a delivered click without a browser
+          // timeout. Retry the same guarded target once if it never committed.
+        }
         if(!verified)throw new Error('页面没有确认选项选中状态，已停止。');
       }
     }

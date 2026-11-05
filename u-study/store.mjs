@@ -6,6 +6,7 @@ import * as UStudy from './shared/core.mjs';
 import {validateSettings} from './settings.mjs';
 import {emptyState,validateState,validateManualEntryMarks,SCHEMA_VERSION} from './state-schema.mjs';
 import {verifyBankImages} from './image-materials.mjs';
+import {APP_INFO} from './runtime-check.mjs';
 export {defaultSettings} from './settings.mjs';
 
 const bankName=/^bank-[a-f0-9]{64}\.json$/;
@@ -101,7 +102,7 @@ export class Store extends EventEmitter {
       await this.persist(candidate);this.data=candidate;this.changed({persist:false});return {cleared,manualEntryCount:0};
     });
   }
-  publicState(){return {revision:this.revision,instanceId:this.instanceId,courses:this.data.courses,tasks:this.data.tasks,activity:this.data.activity,settings:this.data.settings,bankCount:this.data.bank.length,exerciseBankCount:this.data.bank.filter(row=>row.kind==='exercise').length,manualEntryCount:this.data.manualEntryMarks.length,lastSynced:this.data.lastSynced,syncCoverage:this.data.syncCoverage,connected:this.connected,windowOpen:this.windowOpen,syncing:this.syncing,operation:this.operation,keyPresent:!!this.apiKey,keySource:this.keySource||'none',storageError:this.storageError};}
+  publicState(){return {appInfo:APP_INFO,revision:this.revision,instanceId:this.instanceId,courses:this.data.courses,tasks:this.data.tasks,activity:this.data.activity,settings:this.data.settings,bankCount:this.data.bank.length,exerciseBankCount:this.data.bank.filter(row=>row.kind==='exercise').length,manualEntryCount:this.data.manualEntryMarks.length,lastSynced:this.data.lastSynced,syncCoverage:this.data.syncCoverage,connected:this.connected,windowOpen:this.windowOpen,syncing:this.syncing,operation:this.operation,keyPresent:!!this.apiKey,keySource:this.keySource||'none',storageError:this.storageError};}
   publish(){this.revision++;this.emit('state',this.publicState());}
   changed({persist=true}={}){
     this.publish();if(persist){clearTimeout(this.saveTimer);this.saveTimer=setTimeout(()=>{this.saveTimer=null;void this.save().catch(()=>{});},250);this.saveTimer.unref();}

@@ -6,6 +6,12 @@ export const STUDY_TIME_HOME = 'https://ucloud.unipus.cn/app/cmgt/course-managem
 // The textbook initializes its fragment after the content has loaded. Course
 // parameters remain part of the binding; visible content identity is checked too.
 export function studyTimePageAddress(value) { const url = new URL(value); url.hash = ''; return url.href; }
+// The same activity label can appear in the breadcrumb and both header bars.
+// Keep its title once, along with the course and unit, regardless of header order.
+const pageIdentity = ({ title, crumbs = [] }) => {
+  const name = studyText(title), context = crumbs.map(studyText).filter(value => value && value !== name);
+  return JSON.stringify([name, context.filter((value, index) => !index || value !== context[index - 1])]);
+};
 const check = signal => signal?.throwIfAborted();
 const closed = page => !page || page.isClosed();
 const review = message => Object.assign(new Error(message), { code: 'STUDY_TIME_REVIEW', preservePage: true });
@@ -59,8 +65,9 @@ export function keepStudyNavigationInTab() {
 
 /** Borrows the existing U-campus context and owns only its study tabs. */
 export class StudyTimeBrowser {
-  constructor(_directory, { getContext, existingContext = () => null, canOperatePage = () => true, canConfirmSessionNotice = () => false, isIdle = () => true, runShared = work => work(), onLost = () => {}, pollMs = 300 } = {}) {
+  constructor(_directory, { getContext, existingContext = () => null, canOperatePage = () => true, canConfirmSessionNotice = () => false, isIdle = () => true, runShared = work => work(), onLost = () => {}, pollMs = 300, activityTimeoutMs = 20000 } = {}) {
     this.getContext = getContext; this.existingContext = existingContext; this.runShared = runShared; this.onLost = onLost; this.pollMs = pollMs;
+    this.activityTimeoutMs = activityTimeoutMs;
     this.canOperatePage = canOperatePage;
     this.canConfirmSessionNotice = canConfirmSessionNotice; this.backgroundRecoveries = 0;
     this.isIdle = isIdle;
@@ -286,30 +293,38 @@ export class StudyTimeBrowser {
     this.binding = { page, url: page.url(), frameURL: '', identity: '', expectedTitle: task.entryTitle, pending: true, suspended: false };
     return this.waitForActivity(page, task, signal);
   }
-  async waitForActivity(page, task, signal) {
-    const deadline = Date.now() + 20000; let stable = '';
+  async waitForActivity(page, task, signal, { binding = null } = {}) {
+    const deadline = Date.now() + this.activityTimeoutMs; let stable = '', issue = '';
     do {
       check(signal);
       if (closed(page) || !this.owns(page)) throw review('学习标签页已关闭或被其他任务接管，请核对后继续。');
-      const report = await this.inspect(page, signal);
+      const report = await this.inspect(page, signal); check(signal);
+      if (binding && studyTimePageAddress(page.url()) !== studyTimePageAddress(binding.url)) throw review('学习页面地址已变化，请核对后继续。');
       if (report.notices.some(notice => notice.kind !== 'unknown' && notice.selector)) {
         stable = ''; await this.dismissNotice(page, report, signal); await sleep(this.pollMs, undefined, { signal }); continue;
       }
       if (report.ready && !report.notices.length) {
-        if (!studyEntryMatches(task.entryTitle, report)) throw review('打开的学习内容与所选页面不一致，请重新选择。');
         const routeUnit = page.url().match(/\/courseware\/([^/?#]+)/)?.[1];
-        if (task.unitId !== 'current' && routeUnit && routeUnit !== task.unitId.replace(/^id-/, '').replace(/-tab$/, '')) throw review('学习页面进入了其他单元，请重新选择。');
-        const identity = JSON.stringify([report.title, report.crumbs]), key = JSON.stringify([studyTimePageAddress(page.url()), studyTimePageAddress(report.frame.url()), identity]);
-        if (stable === key) {
-          this.binding = { page, url: page.url(), frameURL: report.frame.url(), identity, suspended: false };
-          return report;
+        const identity = pageIdentity(report);
+        const mismatch = binding && (identity !== binding.identity || studyTimePageAddress(report.frame.url()) !== studyTimePageAddress(binding.frameURL)) ? '学习内容已切换，请核对所选课程和单元。' :
+          !studyEntryMatches(task.entryTitle, report) ? '打开的学习内容与所选页面不一致，请重新选择。' :
+          task.unitId !== 'current' && routeUnit && routeUnit !== task.unitId.replace(/^id-/, '').replace(/-tab$/, '') ? '学习页面进入了其他单元，请重新选择。' : '';
+        // Headers and breadcrumbs can finish after the body becomes readable.
+        // During explicit recovery, keep the old identity until it matches again.
+        if (mismatch) { stable = ''; issue = mismatch; }
+        else {
+          const key = JSON.stringify([studyTimePageAddress(page.url()), studyTimePageAddress(report.frame.url()), identity]);
+          if (stable === key) {
+            this.binding = { page, url: page.url(), frameURL: report.frame.url(), identity, suspended: false };
+            return report;
+          }
+          stable = key; issue = '';
         }
-        stable = key;
-      } else stable = '';
+      } else { stable = ''; issue = report.issue || issue; }
       if (report.hasAnswerControls || report.login || report.notices.length) throw review(report.issue || '学习页面存在需要人工核对的提示。');
       await sleep(this.pollMs, undefined, { signal });
     } while (Date.now() < deadline);
-    throw review('学习页面尚未就绪，请在学习窗口选择学习目标等阅读页面。');
+    throw review(issue || '学习页面尚未就绪，请在学习窗口选择学习目标等阅读页面。');
   }
   async inspect(page, signal) {
     if (closed(page)) throw review('学习页面已关闭，请重新打开 U校园窗口后继续。');
@@ -352,9 +367,9 @@ export class StudyTimeBrowser {
     this.assertBinding(); const report = await this.inspect(this.binding.page, signal); check(signal); this.assertBinding();
     if (report.ready && this.binding.pending) {
       if (!studyEntryMatches(this.binding.expectedTitle, report)) throw review('当前学习内容与所选页面不一致，请重新选择。');
-      this.binding.frameURL = report.frame.url(); this.binding.identity = JSON.stringify([report.title, report.crumbs]); this.binding.pending = false;
+      this.binding.frameURL = report.frame.url(); this.binding.identity = pageIdentity(report); this.binding.pending = false;
     }
-    if (report.ready && (studyTimePageAddress(report.frame.url()) !== studyTimePageAddress(this.binding.frameURL) || JSON.stringify([report.title, report.crumbs]) !== this.binding.identity)) throw review('学习内容已切换，请核对所选课程和单元。');
+    if (report.ready && (studyTimePageAddress(report.frame.url()) !== studyTimePageAddress(this.binding.frameURL) || pageIdentity(report) !== this.binding.identity)) throw review('学习内容已切换，请核对所选课程和单元。');
     return report;
   }
   async dismissNotice(page, report, signal) {
@@ -425,20 +440,13 @@ export class StudyTimeBrowser {
   }
   async resume(course, task, signal) {
     this.nativeDialog = null;
-    if (this.binding?.suspended && !closed(this.binding.page)) {
-      await this.navigate(this.binding.page, this.binding.url, signal); this.binding.suspended = false;
-      if (this.binding.pending) return this.waitForActivity(this.binding.page, task, signal);
-      const report = await this.read(signal);
-      if (report.ready && !report.notices.length) return report;
-      if (report.notices.length) { const result = await this.recover(report, signal); if (result.report.ready) return result.report; }
-      throw review(report.issue || '学习页面未恢复，请核对后继续。');
-    }
     if (this.binding && !closed(this.binding.page)) {
+      if (this.binding.suspended) {
+        await this.navigate(this.binding.page, this.binding.url, signal); this.binding.suspended = false;
+      }
       if (this.binding.pending) return this.waitForActivity(this.binding.page, task, signal);
-      const report = await this.read(signal);
-      if (report.ready && !report.notices.length) return report;
-      if (report.notices.length) { const result = await this.recover(report, signal); if (result.report.ready) return result.report; }
-      throw review(report.issue || '学习页面未恢复，请核对后继续。');
+      this.assertBinding();
+      return this.waitForActivity(this.binding.page, task, signal, { binding: this.binding });
     }
     return this.openActivity(course, task, signal);
   }

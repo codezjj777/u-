@@ -1,6 +1,6 @@
 # 版本发布与仓库可见性
 
-仓库：[codezjj777/u-](https://github.com/codezjj777/u-)。当前按私有仓库使用，源码、README、Release 和附件只对有权限的账号可见。创建 Release 不会把私有仓库变成公开仓库。
+仓库：[codezjj777/UCampus](https://github.com/codezjj777/UCampus)。仓库可见性以 GitHub 设置为准。自动发布不会修改 Public / Private 设置；私有仓库的 Release 仅对有权限的账号可见。
 
 ## 构建发布包
 
@@ -46,7 +46,7 @@ npm.cmd run release:windows
 从 Release 下载 ZIP，计算摘要并与同一 Release 的 `SHA256SUMS.txt` 对比：
 
 ```powershell
-Get-FileHash .\U-Study-1.4.20-windows-x64.zip -Algorithm SHA256
+Get-FileHash .\U-Study-1.4.30-windows-x64.zip -Algorithm SHA256
 ```
 
 解压到新目录，在没有个人 `.runtime/` 的状态下检查工作台启动、停止和错误日志入口。不要将测试登录后的目录重新打包上传。

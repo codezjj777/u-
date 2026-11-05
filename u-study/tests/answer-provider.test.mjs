@@ -1,11 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {askModel,AIRequestError} from '../answer-provider.mjs';
+import {setTimeout as sleep} from 'node:timers/promises';
 
 const settings={endpoint:'https://ai.example.test/v1/chat/completions',model:'fixture-model'},key='private-provider-key';
 const question={question:'Choose the correct answer.',type:'single',options:['yes','no'],context:'The answer is yes.',targets:[{},{}]};
 const completion=(content='{"answers":["yes"]}',finish_reason='stop')=>new Response(JSON.stringify({choices:[{message:{content},finish_reason}]}),{headers:{'Content-Type':'application/json'}});
 const reset=()=>Object.assign(new TypeError('fetch failed with '+key),{cause:{code:'ECONNRESET'}});
+
+test('pending AI progress separates response waiting from answer generation and ends after completion',async()=>{
+  const events=[];
+  const answer=await askModel(question,settings,key,undefined,{progressIntervalMs:2,onProgress:event=>events.push(event),fetchImpl:async()=>{await sleep(12);return {ok:true,json:async()=>{await sleep(12);return {choices:[{message:{content:'{"answers":["yes"]}'}}],usage:{prompt_tokens:50,completion_tokens:12,completion_tokens_details:{reasoning_tokens:4}}};}};}});
+  assert.deepEqual(answer.answers,['yes']);assert.equal(events[0].stage,'request');assert.ok(events.some(event=>event.stage==='waiting'&&event.phase==='waiting-response'));assert.ok(events.some(event=>event.stage==='waiting'&&event.phase==='receiving-answer'));
+  const completed=events.at(-1);assert.equal(completed.stage,'complete');assert.equal(completed.attempt,1);assert.equal(completed.maxAttempts,3);assert.equal(completed.reasoningTokens,4);assert.ok(completed.elapsedMs>=completed.headersMs);assert.ok(completed.bodyMs>=0);assert.doesNotMatch(JSON.stringify(events),new RegExp(key));const count=events.length;await sleep(15);assert.equal(events.length,count);
+});
+
+test('AI progress timers stop on timeout and never report a completed answer',async()=>{
+  const events=[];
+  await assert.rejects(askModel(question,settings,key,undefined,{timeoutMs:12,maxAttempts:1,progressIntervalMs:2,onProgress:event=>events.push(event),fetchImpl:async(_url,{signal})=>new Promise((_,reject)=>{const keepAlive=setTimeout(()=>reject(new Error('timeout not cancelled')),200);signal.addEventListener('abort',()=>{clearTimeout(keepAlive);reject(signal.reason);},{once:true});})}),error=>error.code==='AI_TIMEOUT');
+  assert.equal(events.some(event=>event.stage==='complete'),false);const count=events.length;await sleep(15);assert.equal(events.length,count);
+});
+
+test('diagnostic callback failures cannot discard an otherwise valid AI answer',async()=>{
+  const answer=await askModel(question,settings,key,undefined,{onProgress:()=>{throw new Error(key);},fetchImpl:async()=>completion()});assert.deepEqual(answer.answers,['yes']);
+});
 
 test('answer requests retry connection resets three times with the identical payload and safe progress',async()=>{
   const requests=[],retries=[];let calls=0,before=0;

@@ -94,7 +94,7 @@ export function readExerciseNavigationFromDOM(){
   return {known,key:known?JSON.stringify([breadcrumbs,chapters[0],leaves[0]]):'',title:leaves.length===1?leaves[0]:'',breadcrumbs,chapter:chapters.length===1?chapters[0]:'',progress:percent};
 }
 
-export const QUESTION_CONTROLS_HANDLER='question-controls-v4';
+export const QUESTION_CONTROLS_HANDLER='question-controls-v5';
 export function collectQuestionsFromDOM({ questionSelector = '', includeDiagnostics = false, mediaTranscripts = {}, imageDigests = {} } = {}) {
   // This function is serialized into each frame: keep all helpers inside it.
   const clean=value=>String(value??'').replace(/[\u200b-\u200d\ufeff]/g,'').replace(/\s+/g,' ').trim();
@@ -157,6 +157,17 @@ export function collectQuestionsFromDOM({ questionSelector = '', includeDiagnost
   const passageCSS=`.passage,[class*="reading-passage"],[class*="readingPassage"],[class*="material-content"],.question-common-abs-material,.layout-material-container,[data-ipublish-question-group-type="rich_text_read_group"],${transcriptCSS}`;
   const scopeFor=root=>root.closest('.layout-container,[data-exercise-id],.question-common-abs-question-container,main')||document.body;
   const blockTexts=(scope,selector)=>outermost(all(scope,selector).filter(visible)).map(el=>text(el,{choices:true})).filter(Boolean);
+  const directionsFor=root=>{
+    for(let scope=scopeFor(root);scope;scope=scope.parentElement){
+      const nodes=all(scope,directionCSS).filter(el=>{
+        if(!visible(el))return false;
+        const owner=el.closest('.layout-container,[data-exercise-id],.question-common-abs-question-container,main');
+        return !owner||owner.contains(root);
+      });
+      const values=outermost(nodes).map(el=>text(el)).filter(Boolean);if(values.length)return [...new Set(values)];
+    }
+    return [];
+  };
   const mediaURL=value=>{try{return new URL(value,document.baseURI||globalThis.location?.href||'https://ucontent.unipus.cn/').href;}catch{return '';}};
   const activeMedia=el=>{
     if(el.closest(ignored)||el.closest('.word-tips,.word-tip,[class*="pronunciation"]'))return false;
@@ -179,8 +190,7 @@ export function collectQuestionsFromDOM({ questionSelector = '', includeDiagnost
     mediaRecords.set(el,record);return record;
   };
   const contextFor=(root,extra=[])=>{
-    const scope=scopeFor(root),directions=blockTexts(scope,directionCSS);
-    if(!directions.length&&scope!==document.body)directions.push(...all(document,directionCSS).filter(el=>visible(el)&&!el.closest('.layout-container,[data-exercise-id],.question-common-abs-question-container,main')).map(el=>text(el)));
+    const scope=scopeFor(root),directions=directionsFor(root);
     // Follow-up exercises often say "Read ... again" or "Correct the false
     // ones" while keeping the video beside the answer fields. The authored
     // media in this exercise scope is material even without watch/listen verbs.
@@ -228,7 +238,7 @@ export function collectQuestionsFromDOM({ questionSelector = '', includeDiagnost
     if(!elements.length)return;
     if(elements.some(el=>covered.has(el))){issue('题目容器重叠，无法唯一定位作答控件。');return;}
     elements.forEach(el=>covered.add(el));
-    items.push({root,elements,question,options,type,context,wordBank,blankOptions,kind,id:root.getAttribute('data-question-id')||root.id||'',fields,questionType,prompts,promptEmphasis,sortItems,mediaKeys:scopeMedia.get(scopeFor(root))||[],images:scopeImages.get(scopeFor(root))||[]});
+    items.push({root,elements,question,options,type,context,directions:directionsFor(root).join(' '),wordBank,blankOptions,kind,id:root.getAttribute('data-question-id')||root.id||'',fields,questionType,prompts,promptEmphasis,sortItems,mediaKeys:scopeMedia.get(scopeFor(root))||[],images:scopeImages.get(scopeFor(root))||[]});
   };
   const fieldOptions=fields=>fields.map(el=>{
     if(el.matches('.scoop-select-wrapper')){
@@ -241,7 +251,33 @@ export function collectQuestionsFromDOM({ questionSelector = '', includeDiagnost
     }
     return el.tagName==='SELECT'?all(el,'option').filter(option=>!option.disabled&&!option.hidden&&!/^(?:请选择|选择答案|please select|select(?: an? (?:option|answer))?|choose(?: an? (?:option|answer))?|[-—]+)$/i.test(clean(option.textContent))&&(option.getAttribute('value')!==''||clean(option.textContent)==='0')).map(option=>({text:clean(option.textContent),value:option.getAttribute('value')??option.textContent})):[];
   });
-  const bankFor=root=>[...new Set(all(root,'[data-option-value],.option-wrapper .option,.banked-options .option').filter(visible).map(el=>clean(el.getAttribute('data-option-value')||text(el))).filter(Boolean))];
+  const bankFor=(root,questionRoot=root)=>{
+    const standard=[...new Set(all(root,'[data-option-value],.option-wrapper .option,.banked-options .option').filter(visible).map(el=>{
+      const caption=el.querySelector('.caption,[data-option-label]'),label=clean(caption?.textContent).match(/^([A-Z])[.、．):：]?$/i),value=text(el);
+      if(label){const word=text(el,{skip:[caption]});if(word)return label[1].toUpperCase()+'. '+word;}
+      return /^[A-Z]\s*[.、．):：]\s*\S/i.test(value)?value:clean(el.getAttribute('data-option-value')||value);
+    }).filter(Boolean))];
+    const directions=directionsFor(questionRoot).join(' '),range=directions.match(/\bletters?\s*(?:from\s+)?(?:\(|\[)?\s*([A-Z])\s*(?:[-–—]|to)\s*([A-Z])\b/i);
+    if(!range||!/(?:\bword\s+bank\b|词库)/i.test(directions))return standard;
+    const start=range[1].toUpperCase().charCodeAt(0),end=range[2].toUpperCase().charCodeAt(0),count=end-start+1;
+    if(count<1||count>26)return standard;
+    const complete=entries=>entries.length===count&&entries.every(entry=>entry&&entry.label.charCodeAt(0)>=start&&entry.label.charCodeAt(0)<=end&&entry.word&&entry.word.length<=200)&&new Set(entries.map(entry=>entry.label)).size===count;
+    const entry=value=>{const match=clean(value).match(/^([A-Z])\s*[.、．):：]\s*(\S[\s\S]*)$/i);return match?{label:match[1].toUpperCase(),word:match[2]}:null;};
+    if(complete(standard.map(entry)))return standard;
+    // Some published cloze banks are ordinary rich-text tables in the left
+    // material pane, outside the answer pane and without option CSS classes.
+    // Read their explicit labels; never assign letters from table positions.
+    const candidates=new Map();
+    for(const material of all(scopeFor(questionRoot),`${passageCSS},table,.option-wrapper,.banked-options`).filter(visible)){
+      const value=text(material),labels=[...value.matchAll(/(?:^|\s)([A-Z])\s*[.、．):：]\s*/gi)];
+      if(labels.length!==count||labels[0].index!==0)continue;
+      const entries=labels.map((label,i)=>({label:label[1].toUpperCase(),word:clean(value.slice(label.index+label[0].length,labels[i+1]?.index??value.length))}));
+      if(!complete(entries))continue;
+      const key=JSON.stringify(entries.map(item=>[item.label,item.word]).sort((a,b)=>a[0].localeCompare(b[0])));candidates.set(key,entries.map(item=>item.label+'. '+item.word));
+    }
+    if(candidates.size>1){issue('本题识别到多个不一致的字母词库，尚未确认应使用哪组词库。');return [];}
+    return candidates.size?[...candidates.values()][0]:standard;
+  };
 
   // Fixed prompts can be sentence halves or text-part/paragraph references.
   // Their sortable answer order is a value, never part of the question stem.
@@ -404,7 +440,7 @@ export function collectQuestionsFromDOM({ questionSelector = '', includeDiagnost
       const choices=fieldOptions(fields);
       if(fields.some((el,i)=>(el.tagName==='SELECT'||el.matches('.scoop-select-wrapper'))&&(el.multiple||!choices[i].length))){issue('下拉填空选项为空、不唯一或尚未完整载入。');continue;}
       const bankScope=root.closest('.layoutBody-container')||root;
-      add(root,{fields,question,context,wordBank:bankFor(bankScope),blankOptions:choices});
+      add(root,{fields,question,context,wordBank:bankFor(bankScope,root),blankOptions:choices});
     }
   }
 
@@ -426,7 +462,7 @@ export function collectQuestionsFromDOM({ questionSelector = '', includeDiagnost
       const path=[];for(let node=item.root;node&&node!==document.body;node=node.parentElement){const tag=node.tagName.toLowerCase(),siblings=[...node.parentElement.children].filter(el=>el.tagName===node.tagName);path.unshift(tag+':nth-of-type('+(siblings.indexOf(node)+1)+')');}
       const rootSelector=item.root.matches('.sequence-view')?'.sequence-view':item.root===document.body?'body':'body > '+path.join(' > ');
       const selector=`[data-ustudy-control="${marker}"]`,sortItems=item.sortItems.map((choice,index)=>{const id=`q${r}-i${index}`;choice.el.setAttribute('data-ustudy-sort-item',id);choice.el.setAttribute('data-ustudy-sort-key',choice.key);return {key:choice.key,text:choice.text,...(choice.originalLabel?{originalLabel:choice.originalLabel}:{}),selector:`${selector} [data-ustudy-sort-item="${id}"]`};});
-      return {question:item.question,type:item.type,questionType:item.questionType,context:item.context,options:item.options,prompts:item.prompts,promptEmphasis:item.promptEmphasis,targets:[{selector,rootSelector,kind:'sortable',key:'matching-'+r,itemSelector:'.sequence-reply-view-item-text[data-ustudy-sort-key]',items:sortItems}],...(item.id?{id:item.id}:{})};
+      return {question:item.question,type:item.type,questionType:item.questionType,context:item.context,...(item.directions?{directions:item.directions}:{}),options:item.options,prompts:item.prompts,promptEmphasis:item.promptEmphasis,targets:[{selector,rootSelector,kind:'sortable',key:'matching-'+r,itemSelector:'.sequence-reply-view-item-text[data-ustudy-sort-key]',items:sortItems}],...(item.id?{id:item.id}:{})};
     }
     const targets=item.elements.map((el,i)=>{
       const marker=`q${r}-${item.type==='text'?'t':'o'}${i}`;el.setAttribute('data-ustudy-control',marker);
@@ -439,7 +475,7 @@ export function collectQuestionsFromDOM({ questionSelector = '', includeDiagnost
       }
       return {selector,kind,key:el.closest('[data-dig-empty-id]')?.getAttribute('data-dig-empty-id')||el.closest('[data-scoop-index]')?.getAttribute('data-scoop-index')||el.id||el.getAttribute('name')||String(i),...(item.blankOptions[i]?.length?{choices:item.blankOptions[i]}:{}),...(kind==='text'&&el.closest('[data-ipublish-question-group-type]')?{inputMode:'keyboard'}:{})};
     });
-    return {question:item.question,options:item.options,type:item.type,targets,context:item.context,...(item.questionType?{questionType:item.questionType}:{}),...(item.id?{id:item.id}:{}),...(item.mediaKeys.length?{mediaKeys:item.mediaKeys}:{}),...(item.wordBank.length?{wordBank:item.wordBank}:{}),...(item.blankOptions.some(options=>options.length)?{blankOptions:item.blankOptions.map(options=>options.map(option=>option.text))}:{})};
+    return {question:item.question,options:item.options,type:item.type,targets,context:item.context,...(item.directions?{directions:item.directions}:{}),...(item.questionType?{questionType:item.questionType}:{}),...(item.id?{id:item.id}:{}),...(item.mediaKeys.length?{mediaKeys:item.mediaKeys}:{}),...(item.wordBank.length?{wordBank:item.wordBank}:{}),...(item.blankOptions.some(options=>options.length)?{blankOptions:item.blankOptions.map(options=>options.map(option=>option.text))}:{})};
   });
   questions.forEach((question,index)=>{if(items[index].images.length){question.images=items[index].images;question.imageKeys=items[index].images.map(image=>image.key);}});
   for(const [index,question] of questions.entries()){
@@ -499,7 +535,9 @@ export function readStudyNoticesFromDOM({kind='',includeDiagnostics=false}={}){
     target.button.setAttribute('data-ustudy-study-notice-action','current');const selector='[data-ustudy-study-notice-action="current"]';
     return includeDiagnostics?{selector,count:1}:selector;
   }
-  return {present:reports.length>0,count:reports.length,frontButtons:candidates.filter(item=>item.front).length,offscreen,...(includeDiagnostics?{dialogs:reports,viewport:{width:innerWidth,height:innerHeight,visibility:document.visibilityState}}:{} )};
+  const describe=el=>{const css=getComputedStyle(el),box=el.getBoundingClientRect();return {className:String(el.className).slice(0,160),role:el.getAttribute('role'),hidden:el.hidden,ariaHidden:el.getAttribute('aria-hidden'),display:css.display,visibility:css.visibility,opacity:css.opacity,pointerEvents:css.pointerEvents,transform:css.transform,width:Math.round(box.width*100)/100,height:Math.round(box.height*100)/100,animationName:css.animationName,animationDuration:css.animationDuration,transitionDuration:css.transitionDuration};};
+  const portals=includeDiagnostics?[...document.querySelectorAll('.ant-modal-wrap')].slice(-12).map(wrap=>({...describe(wrap),released:wrap.style.pointerEvents==='none',dialogs:[...wrap.querySelectorAll('.ant-modal,[role=dialog],[role=alertdialog]')].slice(0,6).map(dialog=>({...describe(dialog),studyNotice:/本单元学习时间/.test(dialog.textContent)&&/是否必修/.test(dialog.textContent),content:[...dialog.querySelectorAll('.ant-modal-content')].slice(0,3).map(describe),animations:(dialog.getAnimations?.({subtree:true})||[]).slice(0,6).map(animation=>({playState:animation.playState,pending:animation.pending,currentTime:typeof animation.currentTime==='number'?animation.currentTime:null}))}))})):undefined;
+  return {present:reports.length>0,count:reports.length,frontButtons:candidates.filter(item=>item.front).length,offscreen,...(includeDiagnostics?{dialogs:reports,portals,viewport:{width:innerWidth,height:innerHeight,visibility:document.visibilityState}}:{} )};
 }
 
 export function readLearningStateFromDOM({notice}={}) {

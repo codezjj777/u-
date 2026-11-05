@@ -11,6 +11,7 @@ import {MediaMaterials} from './media-materials.mjs';
 import {ImageMaterials,MAX_PAGE_IMAGE_BYTES} from './image-materials.mjs';
 import {VOCABULARY_HANDLER,isVocabularyEntry,readVocabularyFromDOM,advanceVocabularyCards} from './vocabulary-cards.mjs';
 import {isVideoViewEntry,finishVideoView,dragVideoProgress} from './video-view.mjs';
+import {isAudioViewEntry,finishAudioView,dragAudioProgress} from './audio-view.mjs';
 import {ExerciseLearningSession} from './exercise-learning.mjs';
 import {OralSpeech} from './oral-speech.mjs';
 import {ORAL_HANDLER,isOralRetellEntry} from './oral-activity.mjs';
@@ -38,6 +39,13 @@ async function currentVideoReader(){
   const version=String((await stat(videoReaderURL)).mtimeMs);
   if(version!==videoReaderVersion){videoReader=(await import(`${videoReaderURL.href}?v=${version}`)).readVideoViewFromDOM;videoReaderVersion=version;}
   return videoReader;
+}
+const audioReaderURL=new URL('./audio-view.mjs',import.meta.url);
+let audioReaderVersion='',audioReader;
+async function currentAudioReader(){
+  const version=String((await stat(audioReaderURL)).mtimeMs);
+  if(version!==audioReaderVersion){audioReader=(await import(`${audioReaderURL.href}?v=${version}`)).readAudioViewFromDOM;audioReaderVersion=version;}
+  return audioReader;
 }
 // Read-only platform markup can change independently of the task controller.
 // Refresh course and lesson parsers without restarting the logged-in session.
@@ -449,35 +457,71 @@ export class Automation {
     }catch(error){signal?.throwIfAborted();return {review:true,message:`${error.message} 已保留词卡页，请核对进度，手动完成后点击「继续核对」，或停止后重新开始本单元。`};}
   }
   async readVideoView(page,task,settings={}){
-    const found=[],reader=await currentVideoReader(),questions=await this.readQuestions(page,settings);
+    return this.readMediaView(page,task,settings,'video');
+  }
+  async readAudioView(page,task,settings={}){
+    return this.readMediaView(page,task,settings,'audio');
+  }
+  async readMediaView(page,task,settings,kind){
+    const label=kind==='audio'?'音频':'视频',found=[],reader=await (kind==='audio'?currentAudioReader():currentVideoReader()),questions=await this.readQuestions(page,settings);
     for(const frame of await this.activeFrames(page)){
       try{
         let report=await frame.evaluate(reader);if(!report)continue;
-        if(questions?.hasAnswerControls||questions?.questions?.length)report={...report,ready:false,requiresReview:true,issue:'视频页同时有可作答题目，尚未按纯视频处理。'};
+        if(questions?.hasAnswerControls||questions?.questions?.length)report={...report,ready:false,requiresReview:true,issue:`${label}页同时有可作答题目，尚未按纯${label}处理。`};
         const navigation=await frame.evaluate(readExerciseNavigationFromDOM),pageURL=page.url(),frameURL=frame.url();
         found.push({...report,page,frame,pageURL,frameURL,navigation,binding:JSON.stringify([pageURL,frameURL,navigation.key,report.sourceKey])});
       }catch{if(page.isClosed())throw new Error('课程窗口已关闭。');}
     }
-    if(found.length>1)return {recognized:true,ready:false,requiresReview:true,issue:'多个框架同时显示视频，无法确认当前项目。'};
+    if(found.length>1)return {recognized:true,ready:false,requiresReview:true,issue:`多个框架同时显示${label}，无法确认当前项目。`};
     return found[0]||null;
   }
   assertVideoViewEntry(task,page,snapshot){
-    if(!isVideoViewEntry(task)||!snapshot?.navigation?.known||UStudy.normalize(snapshot.navigation.title)!==UStudy.normalize(entryTitle(task)))throw new Error('当前视频与所选目录项目无法对应，已停止播放处理。');
+    return this.assertMediaViewEntry(task,page,snapshot,'video');
+  }
+  assertAudioViewEntry(task,page,snapshot){
+    return this.assertMediaViewEntry(task,page,snapshot,'audio');
+  }
+  assertMediaViewEntry(task,page,snapshot,kind){
+    const label=kind==='audio'?'音频':'视频',eligible=kind==='audio'?isAudioViewEntry:isVideoViewEntry;
+    if(!eligible(task)||!snapshot?.navigation?.known||UStudy.normalize(snapshot.navigation.title)!==UStudy.normalize(entryTitle(task)))throw new Error(`当前${label}与所选目录项目无法对应，已停止播放处理。`);
     this.assertEntryPage(page,snapshot.pageURL,snapshot);
-    const routeUnit=page.url().match(/\/courseware\/([^/?#]+)/)?.[1];if(routeUnit&&routeUnit!==task.unitId.replace(/^id-/,'').replace(/-tab$/,''))throw new Error('视频进入了其他单元，已停止处理。');
+    const routeUnit=page.url().match(/\/courseware\/([^/?#]+)/)?.[1];if(routeUnit&&routeUnit!==task.unitId.replace(/^id-/,'').replace(/-tab$/,''))throw new Error(`${label}进入了其他单元，已停止处理。`);
   }
   async completeVideoView(task,page,snapshot,settings,signal,options={}){
-    this.pages.protect(page,'video-progress');const binding=snapshot.binding;
-    const read=async()=>{const fresh=await this.readVideoView(page,task,settings);if(fresh)this.assertVideoViewEntry(task,page,fresh);return fresh;};
-    const setPlaying=async playing=>{
-      let fresh=await read();if(!fresh||fresh.binding!==binding)throw new Error('播放操作前视频已变化，尚未继续。');
+    return this.completeMediaView(task,page,snapshot,settings,signal,'video',options);
+  }
+  async completeAudioView(task,page,snapshot,settings,signal,options={}){
+    return this.completeMediaView(task,page,snapshot,settings,signal,'audio',options);
+  }
+  async completeMediaView(task,page,snapshot,settings,signal,kind,options={}){
+    const label=kind==='audio'?'音频':'视频',readView=kind==='audio'?this.readAudioView.bind(this):this.readVideoView.bind(this),assertEntry=kind==='audio'?this.assertAudioViewEntry.bind(this):this.assertVideoViewEntry.bind(this),finish=kind==='audio'?finishAudioView:finishVideoView,drag=kind==='audio'?dragAudioProgress:dragVideoProgress;
+    this.pages.protect(page,`${kind}-progress`);const binding=snapshot.binding;
+    const read=async()=>{const fresh=await readView(page,task,settings);if(fresh)assertEntry(task,page,fresh);return fresh;};
+    const interact=async(record,action,selector,perform,{pausing=false,cleanup=false}={})=>{
+      const actionSignal=cleanup?undefined:signal;
+      const controlCheck=pausing?async()=>{actionSignal?.throwIfAborted();const current=await read();if(!current||current.binding!==binding)throw new Error(`${label}控件已变化，尚未继续。`);}:checkpoint;
+      // Pausing must run before waiting at the task's pause gate, including
+      // cleanup after the task's original signal has already been aborted.
+      const controller=pausing?{checkpoint:async value=>value?.throwIfAborted()}:this;
+      const operation=async()=>(await currentLessonActions()).performControlAction(controller,record.frame,action,selector,perform,{signal:actionSignal,checkpoint:controlCheck,allowMotion:true});
+      return pausing?operation():this.withStudyNoticeRecovery(task,page,actionSignal,operation);
+    };
+    const reveal=async record=>{if(kind==='video')await record.frame.locator(record.playerSelector).hover({timeout:3000});};
+    const setPlaying=async(playing,{cleanup=false}={})=>{
+      let fresh=await read();if(!fresh||fresh.binding!==binding)throw new Error(`播放操作前${label}已变化，尚未继续。`);
       if(fresh.ended||fresh.paused===!playing)return;
-      if(!fresh.playerSelector)throw new Error('视频播放控件尚不可用。');
+      if(!fresh.playerSelector)throw new Error(`${label}播放控件尚不可用。`);
       // Video.js posters and text layers cover the native video. Hover the
       // enclosing player so its ordinary controls appear through those layers.
-      await fresh.frame.locator(fresh.playerSelector).hover({timeout:3000});fresh=await read();
-      if(!fresh||fresh.binding!==binding||!fresh.playSelector)throw new Error('视频控件已变化，尚未继续。');
-      await fresh.frame.locator(fresh.playSelector).click({timeout:5000});
+      if(kind==='video'){await reveal(fresh);fresh=await read();}
+      if(!fresh||fresh.binding!==binding||!fresh.playSelector)throw new Error(`${label}控件已变化，尚未继续。`);
+      if(kind==='video'){await fresh.frame.locator(fresh.playSelector).click({timeout:5000});return {clicked:true};}
+      let clicked=false;
+      await interact(fresh,playing?'play':'pause',fresh.playSelector,async(_locator,point)=>{
+        const current=await read();if(!current||current.binding!==binding)throw new Error(`${label}控件已变化，尚未继续。`);
+        if(!current.ended&&current.paused!==!playing){if(!point)throw new Error('音频按钮尚不可定位。');await page.mouse.click(point.x,point.y);clicked=true;}
+      },{pausing:!playing,cleanup});
+      return {clicked};
     };
     const checkpoint=async()=>{
       signal?.throwIfAborted();
@@ -487,20 +531,24 @@ export class Automation {
       }else await this.gate(task,signal);
     };
     try{
-      this.assertVideoViewEntry(task,page,snapshot);await this.disposeExerciseLearning(task.id);
-      const result=await finishVideoView({initial:snapshot,read,play:()=>setPlaying(true),pause:()=>setPlaying(false),signal,checkpoint,
+      assertEntry(task,page,snapshot);await this.disposeExerciseLearning(task.id);
+      const result=await finish({initial:snapshot,read,play:()=>setPlaying(true),pause:()=>setPlaying(false),signal,checkpoint,
         seek:async(current,target)=>{
-          await checkpoint();await current.frame.locator(current.playerSelector).hover({timeout:3000});const fresh=await read();
-          if(!fresh||fresh.binding!==binding||!fresh.trackSelector)throw new Error('视频进度条已变化，尚未拖动。');
-          await dragVideoProgress(page,fresh.frame,fresh,target,{signal,checkpoint});
+          await checkpoint();await reveal(current);const fresh=await read();
+          if(!fresh||fresh.binding!==binding||!fresh.trackSelector)throw new Error(`${label}进度条已变化，尚未拖动。`);
+          if(kind==='video'){await drag(page,fresh.frame,fresh,target,{signal,checkpoint});return;}
+          await interact(fresh,'seek',fresh.thumbSelector||fresh.trackSelector,async()=>{
+            const position=await read();if(!position||position.binding!==binding||!position.trackSelector)throw new Error(`${label}进度条已变化，尚未拖动。`);
+            await drag(page,position.frame,position,target,{signal,checkpoint});
+          });
         },
-        onProgress:phase=>this.store.addLog(task,{seeking:'正在将视频进度条拖至结束前约 1 秒，随后开始播放。',seeked:'已核对进度条位置，正在点击播放。',playing:'已确认视频从末尾开始播放，正在等待自然结束。','waiting-end':'正在等待播放器的自然结束状态。',ended:'已确认视频自然播放结束，正在回查必修目录。'}[phase]),...options});
-      return {videoDone:true,duration:result.duration};
+        onProgress:phase=>this.store.addLog(task,{seeking:`正在将${label}进度条拖至结束前约 1 秒，随后开始播放。`,seeked:'已核对进度条位置，正在点击播放。','play-clicked':`已点击${label}播放按钮，正在核对实际播放状态。`,playing:`已确认${label}从末尾开始播放，正在等待自然结束。`,'waiting-end':'正在等待播放器的自然结束状态。','resuming-end':'检测到音频在末尾意外暂停，正在从当前位置继续播放。',resumed:'已确认音频继续播放，正在等待自然结束。',ended:`已确认${label}自然播放结束，正在回查必修目录。`}[phase]),...options});
+      return {[kind==='audio'?'audioDone':'videoDone']:true,duration:result.duration};
     }catch(error){
-      try{const fresh=await read();if(fresh?.binding===binding&&!fresh.paused&&!fresh.ended)await setPlaying(false);}catch{}
+      try{const fresh=await read();if(fresh?.binding===binding&&!fresh.paused&&!fresh.ended)await setPlaying(false,{cleanup:true});}catch{}
       signal?.throwIfAborted();
       const message=error.name==='TimeoutError'||/^(?:locator|mouse|page|frame)\./.test(error.message||'')?'播放器控件操作超时或被其他界面遮挡，请确认播放器可见并关闭遮挡后重试。':error.message;
-      return {review:true,message:`${message} 已保留视频页，请核对播放和进度条，手动完成后点击「继续核对」。`};
+      return {review:true,message:`${message} 已保留${label}页，请核对播放和进度条，手动完成后点击「继续核对」。`};
     }
   }
   async waitNextExercisePage(task,page,settings,previous,signal,{timeout=20000}={}){
@@ -508,8 +556,9 @@ export class Automation {
     while(elapsed<timeout){
       await this.gate(task,signal);const started=Date.now();
       if(page.isClosed())throw new Error('课程窗口已关闭。');
-      const state=await this.readLearningState(page);
+      let state=await this.readLearningState(page);
       if(state.login)throw new Error('翻页后登录校验失败，请重新进入课程。');
+      if(state.studyNotice){await this.withStudyNoticeRecovery(task,page,signal,()=>this.dismissStudyNotice(task,page,signal),{noticeOnly:true});state=await this.readLearningState(page);}
       if(!state.loading&&!state.studyNotice){
         if(state.networkIssue)throw new Error('翻页后出现网络异常，后续题目尚未载入。');
         const feedback=await this.readExerciseFeedback(page);if(feedback.summary)return {feedback};
@@ -656,6 +705,11 @@ export class Automation {
           if(!video.ready)throw Object.assign(new Error(video.issue||'纯视频页尚未就绪。'),{mediaChange:{videoView:{issue:video.issue,controls:video.controlHints}}});
           return {ready:true,kind:'video-view',written:false,submitted:false,media:[],questions:[],videoView:{duration:video.duration,currentTime:video.currentTime,paused:video.paused,ended:video.ended,controlsReady:video.controlsReady},logs:task.logs.map(log=>log.message)};
         }
+        if(snapshot.audioView){
+          const audio=snapshot.audioView;this.assertAudioViewEntry(task,page,audio);
+          if(!audio.ready)throw Object.assign(new Error(audio.issue||'纯音频页尚未就绪。'),{mediaChange:{audioView:{issue:audio.issue,controls:audio.controlHints}}});
+          return {ready:true,kind:'audio-view',written:false,submitted:false,media:[],questions:[],audioView:{duration:audio.duration,currentTime:audio.currentTime,paused:audio.paused,ended:audio.ended,controlsReady:audio.controlsReady,controls:audio.controlHints},logs:task.logs.map(log=>log.message)};
+        }
         const media=(snapshot.mediaRequests||[]).map(item=>({kind:item.kind,sourceCount:item.sources.length,subtitleCount:item.tracks.length,duration:item.duration,protocols:[...new Set(item.sources.map(value=>{try{return new URL(value).protocol;}catch{return 'unknown';}}))]}));
         if(snapshot.mediaRequests?.length)snapshot=await this.prepareMedia(task,page,snapshot,settings,signal);
         if(snapshot.videoRequests?.length)snapshot=await this.prepareVideoFrames(task,page,snapshot,settings,signal);
@@ -676,7 +730,7 @@ export class Automation {
           }
         }
         await this.verifyImages(task,page,snapshot,signal,{settings,interactive:false});
-        return {ready:true,written:false,submitted:false,media,questions:snapshot.questions.map((question,i)=>({question:question.question,type:question.type,options:question.options,context:question.context,...(question.type==='text'?{blankCount:question.targets.length,blankOptions:question.blankOptions||question.targets.map(target=>target.choices?.map(choice=>choice.text)||[])}:{}),...(question.type==='matching'?{prompts:question.prompts,promptEmphasis:question.promptEmphasis}:{}),...(answers[i]?{answers:answers[i].answers}:{})})),logs:task.logs.map(log=>log.message)};
+        return {ready:true,written:false,submitted:false,media,questions:snapshot.questions.map((question,i)=>({question:question.question,type:question.type,options:question.options,context:question.context,...(question.directions?{directions:question.directions}:{}),...(question.type==='text'?{blankCount:question.targets.length,wordBank:question.wordBank||[],blankOptions:question.blankOptions||question.targets.map(target=>target.choices?.map(choice=>choice.text)||[])}:{}),...(question.type==='matching'?{prompts:question.prompts,promptEmphasis:question.promptEmphasis}:{}),...(answers[i]?{answers:answers[i].answers}:{})})),logs:task.logs.map(log=>log.message)};
       }catch(error){
         if(page&&/提示尚未关闭|加载|登录校验/.test(error.message))this.pages.protect(page,'preview-review');
         if(page&&['IMAGE_CHANGED','IMAGE_READ_UNAVAILABLE','MEDIA_SNAPSHOT_CHANGED'].includes(error.code))this.pages.protect(page,'image-review');
@@ -784,6 +838,42 @@ export class Automation {
     const detail=count?`仍有 ${count} 个可见学习提示，${front} 个确认按钮位于前层；已处理 ${clicks} 次`:'提示状态在复查期间持续变化';
     throw Object.assign(new Error(`学习时间提示关闭未稳定：${detail}。已保留题页，请核对后继续。`),{code:'LESSON_ACTION_BLOCKED',noticeDiagnostics:reports.map(({frame,...report})=>report)});
   }
+  async withStudyNoticeRecovery(task,page,signal,perform,{noticeOnly=false}={}){
+    signal?.throwIfAborted();const url=page.url?.();
+    try{return await perform(false);}
+    catch(error){
+      signal?.throwIfAborted();if(error.code!=='LESSON_ACTION_BLOCKED'||url&&page.url?.()!==url)throw error;
+      await this.gate(task,signal);
+      const dismissed=await this.dismissStudyNotice(task,page,signal);
+      signal?.throwIfAborted();if(url&&page.url?.()!==url)throw error;
+      if(noticeOnly)return dismissed;
+      this.store.addLog(task,dismissed?'操作受阻后已自动关闭学习提示，正在重试当前操作。':'操作受阻后已重新检查学习提示，正在重试当前操作。');
+      return perform(true);
+    }
+  }
+  async prepareLessonEntry(task,page,signal,{settleMs=500,pollMs=100}={}){
+    let elapsed=0,dismissed=false;
+    do{
+      await this.gate(task,signal);const started=Date.now();
+      dismissed=await this.withStudyNoticeRecovery(task,page,signal,()=>this.dismissStudyNotice(task,page,signal),{noticeOnly:true})||dismissed;
+      if(typeof page?.frames!=='function')return dismissed;
+      elapsed+=Date.now()-started;if(elapsed>=settleMs)return dismissed;
+      const delay=Math.min(pollMs,settleMs-elapsed);await sleep(delay,undefined,{signal});elapsed+=delay;
+    }while(elapsed<settleMs);
+    return dismissed;
+  }
+  async withAIStudyNoticeWatch(page,signal,request,check,{pollMs=500}={}){
+    if(typeof page?.frames!=='function')return request(signal);
+    const requestAbort=new AbortController(),stopWatch=new AbortController();
+    const requestSignal=signal?AbortSignal.any([signal,requestAbort.signal]):requestAbort.signal,watchSignal=signal?AbortSignal.any([signal,stopWatch.signal]):stopWatch.signal;
+    let fail;const failed=new Promise((_,reject)=>{fail=reject;});
+    const watcher=(async()=>{
+      try{for(;;){await sleep(pollMs,undefined,{signal:watchSignal});await check(watchSignal,{readContent:false});}}
+      catch(error){if(!stopWatch.signal.aborted){const reason=signal?.aborted?signal.reason:error;requestAbort.abort(reason);fail(reason);}}
+    })();
+    try{return await Promise.race([Promise.resolve().then(()=>request(requestSignal)),failed]);}
+    finally{stopWatch.abort();await watcher;}
+  }
   async readDiscussionBoard(page){return (await currentDiscussionHandler()).readDiscussionBoard(this,page);}
   async readRoleplay(page){return (await currentRoleplayHandler()).readRoleplay(this,page);}
   async waitQuestions(task,page,settings,signal,{previous='',timeout=30000,allowUnsupported=false,allowSummary=false}={}){
@@ -793,7 +883,7 @@ export class Automation {
       lastState=await this.readLearningState(page);
       if(lastState.login)throw new Error('U校园或教材内容页的登录校验失败，请在登录窗口重新进入课程后启动任务。');
       if(lastState.studyNotice){
-        await this.dismissStudyNotice(task,page,signal);lastState=await this.readLearningState(page);
+        await this.withStudyNoticeRecovery(task,page,signal,()=>this.dismissStudyNotice(task,page,signal),{noticeOnly:true});lastState=await this.readLearningState(page);
       }
       const blocked=lastState.loading||lastState.studyNotice;
       if(!blocked&&allowSummary&&!previous){const feedback=await this.readExerciseFeedback(page);if(feedback.summary)return {summaryFeedback:feedback};}
@@ -841,8 +931,9 @@ export class Automation {
     if(lastVocabulary)return lastVocabulary;
     if(lastDiscussion)return lastDiscussion;
     if(lastRoleplay)return lastRoleplay;
-    if(allowUnsupported&&!previous&&isVideoViewEntry(task)&&(!lastSnapshot||lastSnapshot.manualOnly)){
-      const videoView=await this.readVideoView(page,task,settings);if(videoView?.navigation?.known)return {videoView};
+    if(allowUnsupported&&!previous&&(!lastSnapshot||lastSnapshot.manualOnly)){
+      if(isVideoViewEntry(task)){const videoView=await this.readVideoView(page,task,settings);if(videoView?.navigation?.known)return {videoView};}
+      if(isAudioViewEntry(task)){const audioView=await this.readAudioView(page,task,settings);if(audioView?.navigation?.known)return {audioView};}
     }
     if(lastSnapshot?.issues?.length)return lastSnapshot;
     // Directions/material can render before editable questions. Give those
@@ -952,6 +1043,7 @@ export class Automation {
     }
   }
   async answerEntryAttempt(task,page,settings,signal,{initialSnapshot,correction,submittedAnswers=new Set()}={}){
+    await this.prepareLessonEntry(task,page,signal);
     let snapshot=initialSnapshot;
     try{if(!snapshot)snapshot=await this.waitQuestions(task,page,settings,signal,{allowUnsupported:true,allowSummary:true});}
     catch(error){
@@ -973,6 +1065,7 @@ export class Automation {
     if(snapshot?.discussion)return (await currentDiscussionHandler()).completeDiscussionBoard(this,task,page,snapshot.discussion,settings,signal);
     if(snapshot?.vocabulary)return this.completeVocabulary(task,page,snapshot.vocabulary,signal);
     if(snapshot?.videoView)return this.completeVideoView(task,page,snapshot.videoView,settings,signal);
+    if(snapshot?.audioView)return this.completeAudioView(task,page,snapshot.audioView,settings,signal);
     if(!snapshot||snapshot.manualOnly){
       const manualURL=snapshot?.pageURL||page.url(),routeUnit=manualURL.match(/\/courseware\/([^/?#]+)/)?.[1];
       if(task.unitId&&routeUnit&&routeUnit!==task.unitId.replace(/^id-/,'').replace(/-tab$/,''))throw new Error('内容载入后进入了其他单元，已停止标记。');
@@ -1008,36 +1101,50 @@ export class Automation {
     const prepared=[],wholePageAnswers=UStudy.matchExercisePage(snapshot.questions,{courseId:task.courseId,unitId:task.unitId,entryKey:task.entryKey},index);
     const evidence=correction?analyzeCorrectionHistory(snapshot,correction.history):null;
     if(evidence?.contradictory)return {review:true,message:'平台评分记录存在冲突，尚未填写或提交，请待评分稳定后核对。'};
-    const checkAIPage=async()=>{
-      await this.gate(task,signal);this.assertEntryPage(page,entryURL,snapshot);
-      if(typeof snapshot.frame?.evaluate==='function'){
-        for(;;)try{await this.dismissStudyNotice(task,page,signal);break;}
-        catch(error){
-          signal.throwIfAborted();if(error.code!=='LESSON_ACTION_BLOCKED')throw error;
-          this.pages.protect(page,'study-notice-review');task.status='review';this.store.changed();
-          this.store.addLog(task,`${error.message} 当前题页及本轮已生成的答案已保留；处理后点击「继续核对」，继续本轮请求与复核。`,'warning');await this.gate(task,signal);
+    let aiPageChecks=Promise.resolve();
+    const checkAIPage=(checkSignal=signal,{readContent=true}={})=>{
+      // The entry/retry checks and the pending-request watcher share one queue;
+      // a late portal must not be acknowledged by two checks at once.
+      const pending=aiPageChecks.catch(()=>{}).then(async()=>{
+        await this.gate(task,checkSignal);this.assertEntryPage(page,entryURL,snapshot);
+        if(typeof snapshot.frame?.evaluate==='function'){
+          let dismissed=false;
+          for(;;)try{dismissed=await this.withStudyNoticeRecovery(task,page,checkSignal,()=>this.dismissStudyNotice(task,page,checkSignal),{noticeOnly:true});break;}
+          catch(error){
+            checkSignal?.throwIfAborted();if(error.code!=='LESSON_ACTION_BLOCKED')throw error;
+            this.pages.protect(page,'study-notice-review');task.status='review';this.store.changed();
+            this.store.addLog(task,`${error.message} 当前题页及本轮已生成的答案已保留；处理后点击「继续核对」，继续本轮请求与复核。`,'warning');await this.gate(task,checkSignal);
+          }
+          checkSignal?.throwIfAborted();this.assertEntryPage(page,entryURL,snapshot);
+          if(!readContent&&!dismissed)return;
+          const fresh=await this.readQuestions(page,settings);this.assertEntryPage(page,entryURL,fresh);
+          if(!fresh||fresh.signature!==snapshot.signature)throw new Error('AI 请求期间题目或阅读材料发生变化，已停止，请重新启动任务。');
         }
-        const fresh=await this.readQuestions(page,settings);this.assertEntryPage(page,entryURL,fresh);
-        if(!fresh||fresh.signature!==snapshot.signature)throw new Error('AI 请求期间题目或阅读材料发生变化，已停止，请重新启动任务。');
-      }
+      });aiPageChecks=pending;return pending;
     };
     // Resolve the whole leaf before writing any answer.
     for(const [i,question] of snapshot.questions.entries()){
       await this.gate(task,signal);let answer=wholePageAnswers?.[i]||UStudy.matchAnswer({...question,scope:{courseId:task.courseId,unitId:task.unitId,entryKey:task.entryKey}},index),textPrepared=false;
       const prepare=value=>{const result=prepareTextAnswer(question,value);if(result.changed)this.store.addLog(task,`第 ${i+1} 题已将 ${result.changed} 处排版标点转换为普通标点，便于 U校园接收输入。`);textPrepared=true;return result.answer;};
       if(settings.aiEnabled&&(!answer||correction)){
-        this.store.addLog(task,correction?`正在根据答题小结重新核实第 ${i+1} 题。`:`第 ${i+1} 题未命中题库，正在请求配置的 AI 服务${question.context?.trim()?`（已附带 ${question.context.trim().length} 字符上下文）`:''}。`);
         const previousAnswers=evidence?.history.at(-1)?.answers[i]||(correction?.signature===snapshot.signature?correction.previous?.[i]?.answers:undefined);
         const correctionData=correction?{feedback:correction.feedback,...(previousAnswers?{previousAnswers}:{}),...correctionPromptFor(evidence,i)}:undefined;
         let evidenceRetries=0;
         for(;;){
           try{
             await checkAIPage();
-            answer=await measureStage(task,'ai',()=>this.askModel(question,settings,apiKey,signal,{
+            const requirements=UStudy.textAnswerRequirements(question);
+            if(question.directions?.trim())this.store.addLog(task,`第 ${i+1} 题：已读取 ${question.directions.trim().length} 字符题目要求${requirements?`，须填写词库对应的大写字母${requirements.allowReuse?'':'，每个选项最多使用一次'}`:''}。`);
+            this.store.addLog(task,correction?`正在根据答题小结重新核实第 ${i+1} 题。`:`第 ${i+1} 题未命中题库，正在请求配置的 AI 服务${question.context?.trim()?`（已附带 ${question.context.trim().length} 字符上下文）`:''}。`);
+            answer=await measureStage(task,'ai',()=>this.withAIStudyNoticeWatch(page,signal,requestSignal=>this.askModel(question,settings,apiKey,requestSignal,{
               correction:correctionData,
-              beforeAttempt:checkAIPage,
+              beforeAttempt:()=>checkAIPage(requestSignal),
+              onProgress:event=>{
+                if(event.stage==='waiting')this.store.addLog(task,`第 ${i+1} 题：AI 已等待 ${Math.round(event.elapsedMs/1000)} 秒，${event.phase==='waiting-response'?'正在等待服务响应':'接口已连接，正在等待完整答案'}（第 ${event.attempt}/${event.maxAttempts} 次请求）。`);
+                if(event.stage==='complete')this.store.addLog(task,`第 ${i+1} 题：AI 答案已返回，本次请求耗时 ${(event.elapsedMs/1000).toFixed(1)} 秒。`);
+              },
               onRetry:({nextAttempt,maxAttempts,delayMs,reason})=>this.store.addLog(task,`第 ${i+1} 题：${reason} ${Math.ceil(delayMs/1000)} 秒后自动重试（${nextAttempt}/${maxAttempts}）。`,'warning')
-            }));
+            }),checkAIPage));
             await checkAIPage();
             answer=prepare(answer);
             if(evidence){
@@ -1057,7 +1164,7 @@ export class Automation {
             task.source='题库 + AI';break;
           }catch(error){
             signal.throwIfAborted();
-            if(typeof snapshot.frame?.evaluate==='function')await this.dismissStudyNotice(task,page,signal);
+            if(typeof snapshot.frame?.evaluate==='function'&&page.url()===entryURL)await this.dismissStudyNotice(task,page,signal);
             if(error instanceof AIRequestError&&error.code==='AI_MISSING_MATERIAL')return {review:true,message:`第 ${i+1} 题：${error.message} ${question.context?.trim()?`当前题已附带 ${question.context.trim().length} 字符上下文。`:'当前题未读取到可用上下文。'} 本轮尚未自动填写或提交当前页。请核对题目实际需要的信息，手动完成并提交后点击「继续核对」；该项目不会标记为无题或自动跳过。`};
             if(error instanceof AIRequestError&&['AI_IMAGE_MISSING','AI_VISION_REQUEST_ERROR'].includes(error.code))return {review:true,message:`第 ${i+1} 题：${error.message} 本轮尚未自动填写或提交当前页。请核对图片或识图模型配置，手动完成并提交后点击「继续核对」；该项目不会标记为无题或自动跳过。`};
             if(!(error instanceof AIRequestError)||!error.retryable)throw error;
@@ -1087,16 +1194,27 @@ export class Automation {
     const checkpoint=async()=>{
       await this.gate(task,signal);this.assertEntryPage(page,entryURL,current);
       if(typeof current.frame?.evaluate==='function'){
-        await this.dismissStudyNotice(task,page,signal);
+        for(;;)try{await this.withStudyNoticeRecovery(task,page,signal,()=>this.dismissStudyNotice(task,page,signal),{noticeOnly:true});break;}
+        catch(error){await reviewAnswerAction(error);}
         const fresh=await this.readQuestions(page,settings);this.assertEntryPage(page,entryURL,fresh);
         if(!fresh||fresh.signature!==snapshot.signature)throw new Error('填写前题目或阅读材料发生变化，已停止。');
       }
+    };
+    const reviewAnswerAction=async error=>{
+      signal.throwIfAborted();if(error.code!=='LESSON_ACTION_BLOCKED')throw error;
+      this.pages.protect(page,'draft');task.status='review';this.store.changed();
+      this.store.addLog(task,`${error.message} 已保留本页全部已生成答案和已填内容；恢复后只重试当前作答操作并复核，不重复请求 AI。`,'warning');
+      await this.gate(task,signal);
+    };
+    const interact=async(frame,selector,perform)=>{
+      for(;;)try{return await this.withStudyNoticeRecovery(task,page,signal,async()=>(await currentLessonActions()).performAnswerAction(this,frame,selector,perform,{signal,checkpoint}));}
+      catch(error){await reviewAnswerAction(error);}
     };
     for(const [i,answer] of prepared.entries()){
       await this.gate(task,signal);this.assertEntryPage(page,entryURL,current);
       if(task.answered>=500)throw new Error('单次任务已达到 500 道题上限，请确认后新建任务。');
       const question=current.questions[i],frame=current.questionFrames?.[i]||current.frame;this.pages.protect(page,'draft');
-      try{await measureStage(task,'fill',()=>this.fillQuestion(frame,question,answer,{signal,checkpoint,textPrepared:true,onMatchingRecovery:({moves,maxMoves})=>this.store.addLog(task,`检测到配对顺序异步回退，正在按当前整组顺序重新定位（已拖动 ${moves}/${maxMoves} 次），复用已有答案，尚未提交。`,'warning')}));}
+      try{await measureStage(task,'fill',()=>this.fillQuestion(frame,question,answer,{signal,checkpoint,interact,textPrepared:true,onMatchingRecovery:({moves,maxMoves})=>this.store.addLog(task,`检测到配对顺序异步回退，正在按当前整组顺序重新定位（已拖动 ${moves}/${maxMoves} 次），复用已有答案，尚未提交。`,'warning')}));}
       catch(error){signal.throwIfAborted();if(error instanceof TextInputError)return {review:true,message:`第 ${i+1} 题：${error.message} 已保留当前页，请核对输入限制后手动完成并提交，再点击「继续核对」。`};throw error;}
       await this.gate(task,signal);task.answered++;
       this.store.addLog(task,`${answer.source}${answer.matchBasis?'（'+answer.matchBasis+'）':''} · 已填答：${question.question.slice(0,70)} → ${question.type==='multiple'&&!answer.answers.length?'不选任何选项':answer.answers.join(' / ').slice(0,120)}`);
@@ -1134,7 +1252,12 @@ export class Automation {
       let clicked=false,observedSubmission=false;
       if(candidates.length===1)await learning?.prepareSubmission();
       if(candidates.length===1)for(;;){
-        try{clicked=await this.action(candidates[0],kind,selector,{signal,checkpoint,beforeClick});break;}
+        try{
+          clicked=await this.withStudyNoticeRecovery(task,page,signal,async retry=>{
+            if(retry){const feedback=await this.readExerciseFeedback(page);if(feedback.summary&&feedback.pageURL===entryURL&&feedback.navigationKey===current.navigation?.key){observedSubmission=true;return true;}}
+            return this.action(candidates[0],kind,selector,{signal,checkpoint,beforeClick});
+          });break;
+        }
         catch(error){
           signal.throwIfAborted();if(error.code!=='LESSON_ACTION_BLOCKED')throw error;
           this.pages.protect(page,'draft');task.status='review';this.store.changed();this.store.addLog(task,`${error.message} 恢复后只重试当前操作并核对已填答案，不重复请求 AI。`,'warning');
@@ -1144,7 +1267,7 @@ export class Automation {
         }
       }
       if(clicked){
-        this.store.addLog(task,observedSubmission?'已确认等待期间手动提交的本项目小结，正在核对目录状态。':kind==='submit'?'已点击本项目提交按钮，正在核对目录状态。':'已保存当前页并点击「下一题」，正在检查后续页面是否仍属于本项目。');submitted=true;actionKind=observedSubmission?'submit':kind;break;
+        this.store.addLog(task,observedSubmission?'已确认本项目已提交的小结，正在核对目录状态。':kind==='submit'?'已点击本项目提交按钮，正在核对目录状态。':'已保存当前页并点击「下一题」，正在检查后续页面是否仍属于本项目。');submitted=true;actionKind=observedSubmission?'submit':kind;break;
       }
     }
     if(!submitted)return {review:true,message:'当前页已填答，未识别到唯一的提交按钮，请核对是否还有后续小题，完成并提交后点击「继续核对」。'};
@@ -1177,11 +1300,11 @@ export class Automation {
     if(!await this.action(feedback.frame,'finish','',{signal,checkpoint}))return false;
     this.store.addLog(task,'已确认当前题全部作答，已点击答题小结的「继续学习」，正在等待目录保存完成状态。');return true;
   }
-  async waitTaskCompletion(task,catalog,page,entry,signal,{attempts=4,delayMs=1000,vocabularyComplete=false,videoComplete=false,oralComplete=false,discussionComplete=false}={}){
+  async waitTaskCompletion(task,catalog,page,entry,signal,{attempts=4,delayMs=1000,vocabularyComplete=false,videoComplete=false,audioComplete=false,oralComplete=false,discussionComplete=false}={}){
     await this.gate(task,signal);
     let feedback=await this.readExerciseFeedback(page);this.learningSessions.get(task.id)?.observeFeedback(feedback);
     if(feedback.failed)return {feedback};
-    let submitted=submittedSummary(feedback);const limit=feedback.summary||vocabularyComplete||videoComplete||oralComplete||discussionComplete?Math.max(1,Math.min(attempts,6)):1;let directory,matched,finished=false;
+    let submitted=submittedSummary(feedback);const limit=feedback.summary||vocabularyComplete||videoComplete||audioComplete||oralComplete||discussionComplete?Math.max(1,Math.min(attempts,6)):1;let directory,matched,finished=false;
     for(let attempt=0;attempt<limit;attempt++){
       await this.gate(task,signal);directory=await this.refreshTaskDirectory(task,catalog,signal);
       matched=directory.entries.find(item=>item.key===entry.key&&item.required);
@@ -1202,6 +1325,7 @@ export class Automation {
       if(attempt===0&&submitted)this.store.addLog(task,`U校园已记录本题全部作答${feedback.grading?.score!=null?'，得分 '+feedback.grading.score:''}；目录仍在更新，正在自动回查，期间不会重复生成或提交答案。`);
       if(attempt===0&&vocabularyComplete)this.store.addLog(task,'词卡已显示学习结束，目录仍在更新，正在自动回查，不再重复翻动。');
       if(attempt===0&&videoComplete)this.store.addLog(task,'视频已自然播放结束，目录仍在更新，正在自动回查，不再重复播放。');
+      if(attempt===0&&audioComplete)this.store.addLog(task,'音频已自然播放结束，目录仍在更新，正在自动回查，不再重复播放。');
       if(attempt===0&&oralComplete)this.store.addLog(task,'口语录音已保存并核对，目录仍在更新，正在自动回查，不再重复录音。');
       if(attempt+1<limit)await sleep(delayMs,undefined,{signal});
     }
@@ -1228,7 +1352,7 @@ export class Automation {
         this.store.addLog(task,`已跳过已标记手动项目：${task.currentEntry}。未打开题页或重复识别，仍需手动完成。`);
         continue;
       }
-      if(remembered)this.store.addLog(task,roleplayEntry?'该项目此前被标记为手动处理；新版本已支持 A 角色逐句对话，本次重新识别。':vocabularyEntry?'该词卡项目此前被标记为手动处理；新版本已支持词卡翻页，本次重新识别。':oralEntry?'该项目此前被标记为手动处理；新版本已支持口语复述录音，本次重新识别一次。':'该项目此前被标记为无作答内容；新版本已支持讨论板等控件，本次重新识别一次。');
+      if(remembered)this.store.addLog(task,roleplayEntry?'该项目此前被标记为手动处理；新版本已支持 A 角色逐句对话，本次重新识别。':vocabularyEntry?'该词卡项目此前被标记为手动处理；新版本已支持词卡翻页，本次重新识别。':oralEntry?'该项目此前被标记为手动处理；新版本已支持口语复述录音，本次重新识别一次。':'该项目此前被标记为无作答内容；新版本已支持纯音频、讨论板等页面，本次重新识别一次。');
       if(i>0)directory=await this.refreshTaskDirectory(task,catalog,signal);
       const page=await this.openRequiredEntry(task,catalog,directory,entry,signal);if(!page){await this.store.forgetManualEntry?.(task,settings);continue;}
       await this.beginExerciseLearning(task,page,settings);
@@ -1257,7 +1381,7 @@ export class Automation {
           review=result.review;message=result.message;
           if(review){const fresh=await this.readOralActivity(page).catch(()=>null);if(previousReview&&handler.oralRecordingIdentity(fresh)===previousReview.recordingKey)task.oralReview=previousReview;continue;}
         }
-        const outcome=await this.waitTaskCompletion(task,catalog,page,entry,signal,{vocabularyComplete:result.vocabularyDone===true,videoComplete:result.videoDone===true,oralComplete:result.oralDone===true||result.roleplayDone===true,discussionComplete:result.discussionDone===true}),feedback=outcome.feedback;
+        const outcome=await this.waitTaskCompletion(task,catalog,page,entry,signal,{vocabularyComplete:result.vocabularyDone===true,videoComplete:result.videoDone===true,audioComplete:result.audioDone===true,oralComplete:result.oralDone===true||result.roleplayDone===true,discussionComplete:result.discussionDone===true}),feedback=outcome.feedback;
         if(feedback.failed){review=true;message=`${describeExerciseFailure(feedback)}请在「返回修改」中检查客观题，修改并提交后点击「继续核对」。`;continue;}
         directory=outcome.directory;const matched=outcome.matched;
         if(matched.completed){
@@ -1271,7 +1395,7 @@ export class Automation {
           }
           if(page!==catalog.page)await this.pages.release(page,{completed:true});this.taskPages.delete(task.id);break;
         }
-        review=true;message=result.videoDone?'视频已自然播放结束，但多次回查目录仍未确认完成；已保留视频页，请稍后点击「继续核对」刷新，不再重复播放。':result.vocabularyDone?'词卡已显示学习结束，但多次回查目录仍未确认完成；已保留词卡页，请稍后点击「继续核对」刷新，不再重复翻动。':submittedSummary(feedback)?'U校园已记录本题全部作答，但多次回查目录仍未确认完成；本题不会重复生成或提交。请核对本板块是否还有未完成练习，或稍后点击「继续核对」刷新状态。':result.message||'目录尚未显示当前项目已完成，请在 U校园确认提交后点击「继续核对」。';
+        review=true;message=result.audioDone?'音频已自然播放结束，但多次回查目录仍未确认完成；已保留音频页，请稍后点击「继续核对」刷新，不再重复播放。':result.videoDone?'视频已自然播放结束，但多次回查目录仍未确认完成；已保留视频页，请稍后点击「继续核对」刷新，不再重复播放。':result.vocabularyDone?'词卡已显示学习结束，但多次回查目录仍未确认完成；已保留词卡页，请稍后点击「继续核对」刷新，不再重复翻动。':submittedSummary(feedback)?'U校园已记录本题全部作答，但多次回查目录仍未确认完成；本题不会重复生成或提交。请核对本板块是否还有未完成练习，或稍后点击「继续核对」刷新状态。':result.message||'目录尚未显示当前项目已完成，请在 U校园确认提交后点击「继续核对」。';
       }
     }
     directory=await this.refreshTaskDirectory(task,catalog,signal);

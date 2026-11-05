@@ -15,6 +15,8 @@
   let courseKey = '', unitKey = '', entryKey = '', historyKey = '', logTaskId = '', logKey = '', controlKey = '', timer = null, errorMessage = '';
   let progressBusy = '', progressKey = '';
   let dwellAnchor = null, lastDwell = null, dwellTimer = null;
+  let shutdownRequested = false;
+  const lifetime = new AbortController();
   const progressAttempts = new Map(), progressErrors = new Map();
   const termSummary = document.createElement('section'); termSummary.className = 'study-time-term-summary'; termSummary.setAttribute('aria-label', '学期学习时长'); termSummary.hidden = true;
   const courseToolbar = document.querySelector('#courses-view .section-toolbar'); courseToolbar?.before(termSummary);
@@ -193,6 +195,7 @@
   }
   function startDwellDisplay() {
     clearInterval(dwellTimer);
+    if (shutdownRequested) return;
     dwellTimer = setInterval(() => { if (visible && !document.hidden && state.tasks[0]) renderDwell(state.tasks[0]); }, 100);
   }
   function renderTask(task) {
@@ -218,22 +221,26 @@
     }
   }
   async function request(route, data) {
-    const response = await fetch(`/api/study-time${route}`, { method: data === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', 'X-UStudy': '1' }, ...(data === undefined ? {} : { body: JSON.stringify(data) }), signal: AbortSignal.timeout(data === undefined ? 5000 : 65000) });
+    if (shutdownRequested) throw new DOMException('程序正在安全退出。', 'AbortError');
+    const response = await fetch(`/api/study-time${route}`, { method: data === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', 'X-UStudy': '1' }, ...(data === undefined ? {} : { body: JSON.stringify(data) }), signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(data === undefined ? 5000 : 65000)]) });
     const result = await response.json();
     if (!response.ok) throw Object.assign(new Error(route === '/state' && [404, 405].includes(response.status) ? '当前后台尚未加载学习功能，请在答题任务结束后停止并重新启动程序。' : result.error || '学习时长操作未完成。'), { status: response.status });
     return result;
   }
   async function refresh() {
+    if (shutdownRequested) return;
     if (polling) return; polling = true;
     try { state = await request('/state'); anchorDwell(); if (!online) showError(''); online = true; render(); refreshProgressWhenIdle(); }
     catch (error) { online = false; if (visible) showError(error.message || '学习服务连接中断，正在重连。'); render(); }
     finally { polling = false; }
   }
   async function poll() {
+    if (shutdownRequested) return;
     await refresh(); clearTimeout(timer);
-    timer = setTimeout(poll, visible || state.tasks.some(task => live.has(task.status)) ? 1500 : 10000);
+    if (!shutdownRequested) timer = setTimeout(poll, visible || state.tasks.some(task => live.has(task.status)) ? 1500 : 10000);
   }
   async function action(name) {
+    if (shutdownRequested) return;
     if (busy) return; busy = true; showError(''); render();
     try {
       if (name === 'window') await request('/window', {});
@@ -250,6 +257,7 @@
     finally { busy = false; render(); }
   }
   document.addEventListener('click', event => {
+    if (shutdownRequested) return;
     const progressButton = event.target.closest('[data-study-time-progress-course-id]');
     if (progressButton && !progressButton.disabled) { void refreshProgress(progressButton.getAttribute('data-study-time-progress-course-id')); return; }
     const entry = event.target.closest('[data-study-time-nav],[data-study-time-course-id]');
@@ -269,6 +277,7 @@
   for (const section of [document.querySelector('#courses-view'), document.querySelector('#tasks-view')]) if (section) visibility.observe(section, { attributes: true, attributeFilter: ['hidden'] });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { dwellAnchor = null; void refresh(); } });
   window.addEventListener('pagehide', () => { clearInterval(dwellTimer); clearTimeout(timer); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { dwellAnchor = null; startDwellDisplay(); void poll(); } });
+  window.addEventListener('ustudy-shutdown', () => { shutdownRequested = true; clearInterval(dwellTimer); clearTimeout(timer); lifetime.abort(); });
+  window.addEventListener('pageshow', event => { if (event.persisted && !shutdownRequested) { dwellAnchor = null; startDwellDisplay(); void poll(); } });
   mountCards(); startDwellDisplay(); void poll();
 })();

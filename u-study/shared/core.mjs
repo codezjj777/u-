@@ -1,6 +1,29 @@
 const normalize = value => String(value ?? '').normalize('NFKC').replace(/<[^>]*>/g, ' ').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
 const stem = value => normalize(value).replace(/^\s*(?:第\s*)?\d+\s*[.、．)）:]\s*/, '');
 const optionText = value => normalize(value).replace(/^[a-z]\s*[.、．)）:]\s*/i, '');
+const standaloneDirections=question=>{const directions=normalize(question.directions);return directions&&!normalize(question.context).includes(directions)?directions:'';};
+function textAnswerRequirements(question){
+  if(question.type!=='text'||(question.targets||question.fields||[]).some(field=>['select','unipus-select'].includes(field.kind)))return null;
+  const directions=String(question.directions??question.context??question.question??'');
+  const range=directions.match(/\bletters?\s*(?:from\s+)?(?:\(|\[)?\s*([A-Z])\s*(?:[-–—]|to)\s*([A-Z])\b/i);
+  const letters=/\b(?:write|enter|fill|use)\b[^.!?]{0,100}\b(?:capital|upper[- ]?case)\s+letter\b|(?:填写|填入|写出).{0,30}大写字母/i.test(directions)||!!range&&/\b(?:write|enter|fill|use)\b/i.test(directions);
+  if(!letters)return null;
+  const allowReuse=!/\b(?:may|must|can|should)\s+not\s+(?:use|reuse)\b[^.!?]{0,100}\b(?:more than once|twice)\b|\b(?:each|any)\s+(?:word|option|letter)s?\b[^.!?]{0,60}\b(?:only once|at most once)\b|\b(?:do not|don't|never)\s+(?:reuse|repeat)\b|(?:每个|每个词|每词).{0,20}(?:只能|仅|限).{0,8}一次|不得重复使用/i.test(directions);
+  const bank=question.wordBank||[],choices=bank.map(value=>{const match=String(value).normalize('NFKC').trim().match(/^([A-Z])(?:\s*[.、):：]\s*|\s+)(\S[\s\S]*)$/i);return match?{label:match[1].toUpperCase(),text:match[2].trim()}:null;});
+  const withinRange=!range||choices.every(choice=>choice&&choice.label>=range[1].toUpperCase()&&choice.label<=range[2].toUpperCase());
+  return {format:'word_bank_labels',uppercase:true,allowReuse,choices:bank.length&&choices.every(Boolean)&&withinRange&&new Set(choices.map(choice=>choice.label)).size===choices.length?choices:[]};
+}
+function labelAnswers(values,requirements){
+  if(!requirements.choices.length)return null;
+  const answers=[];
+  for(const value of values){
+    const text=String(value).normalize('NFKC').trim(),letter=/^[A-Z]$/i.test(text)?text.toUpperCase():null;
+    const labeled=text.match(/^([A-Z])\s*[.、):：]\s*(\S[\s\S]*)$/i);
+    const matches=requirements.choices.filter(choice=>letter?choice.label===letter:labeled?choice.label===labeled[1].toUpperCase()&&normalize(choice.text)===normalize(labeled[2]):normalize(choice.text)===normalize(text));
+    if(matches.length!==1)return null;answers.push(matches[0].label);
+  }
+  return !requirements.allowReuse&&new Set(answers).size!==answers.length?null:answers;
+}
 const hash = value => { let n = 2166136261; for (const c of String(value)) n = Math.imul(n ^ c.charCodeAt(0), 16777619); return (n >>> 0).toString(36); };
 function safeCourseUrl(value, base = 'https://ucloud.unipus.cn') {
   try { const u = new URL(value, base); return u.protocol === 'https:' && (u.hostname === 'unipus.cn' || u.hostname.endsWith('.unipus.cn')) && !u.username && !u.password ? u.href : null; } catch { return null; }
@@ -21,9 +44,10 @@ function validateBank(input) {
     if(row.type!==undefined&&!['single','multiple','text','matching'].includes(row.type))throw new Error(`第 ${i+1} 题的 type 无效。`);
     if(row.type==='matching'&&(!matchingKeys(row)||!resolveAnswer(row,row)))throw new Error(`第 ${i+1} 题的配对句子或答案不完整。`);
     if(row.context!==undefined&&(typeof row.context!=='string'||row.context.length>100000))throw new Error(`第 ${i+1} 题的 context 无效。`);
+    if(row.directions!==undefined&&(typeof row.directions!=='string'||row.directions.length>20000))throw new Error(`第 ${i+1} 题的 directions 无效。`);
     if(row.scope!==undefined&&(!row.scope||typeof row.scope!=='object'||Array.isArray(row.scope)||Object.entries(row.scope).some(([key,value])=>!['courseId','unitId','entryKey'].includes(key)||typeof value!=='string'||value.length>2000)))throw new Error(`第 ${i+1} 题的 scope 无效。`);
     if(row.options&&(row.options.length>100||row.options.some(x=>!x.trim()||x.length>20000)))throw new Error(`第 ${i+1} 题的选项数量或长度无效。`);
-    return { question: row.question.trim(), answer: answers.map(x => x.trim()), options: row.options?.map(x => x.trim()), explanation: String(row.explanation || '').slice(0, 20000),...(row.type?{type:row.type}:{}),...(row.type==='matching'?{prompts:[...row.prompts],promptEmphasis:row.promptEmphasis.map(words=>[...words])}:{}),...(row.context!==undefined?{context:row.context.trim()}:{}),...(row.scope?{scope:{...row.scope}}:{}) };
+    return { question: row.question.trim(), answer: answers.map(x => x.trim()), options: row.options?.map(x => x.trim()), explanation: String(row.explanation || '').slice(0, 20000),...(row.type?{type:row.type}:{}),...(row.type==='matching'?{prompts:[...row.prompts],promptEmphasis:row.promptEmphasis.map(words=>[...words])}:{}),...(row.context!==undefined?{context:row.context.trim()}:{}),...(row.directions!==undefined?{directions:row.directions.trim()}:{}),...(row.scope?{scope:{...row.scope}}:{}) };
   });
 }
 function buildBankIndex(bank) {
@@ -51,6 +75,7 @@ function validateExercise(row){
     const questions=page.questions.map(question=>{
       parts++;if(!question||!text(question.question)||!['single','multiple','text','matching'].includes(question.type)||!list(question.options,100)||typeof question.context!=='string'||question.context.length>100000||!list(question.wordBank)||!Array.isArray(question.fields)||!question.fields.length||question.fields.length>500||!list(question.answer)||!question.answer.length&&question.type!=='multiple')fail();
       if(question.id!==undefined&&!text(question.id,2000)||question.questionType!==undefined&&!text(question.questionType,200))fail();
+      if(question.directions!==undefined&&(typeof question.directions!=='string'||question.directions.length>20000))fail();
       if(question.explanation!==undefined&&(typeof question.explanation!=='string'||question.explanation.length>100000))fail();
       const fields=question.fields.map(field=>{
         if(!field||!['text','editable','select','unipus-select','native','custom','unipus-choice','ipublish-choice','sortable'].includes(field.kind)||field.key!==undefined&&(!text(field.key,2000))||field.inputMode!==undefined&&field.inputMode!=='keyboard')fail();
@@ -65,13 +90,16 @@ function validateExercise(row){
       if(question.type!=='matching'&&fields.some(field=>field.items!==undefined))fail();
       if(!Array.isArray(question.blankOptions)||question.blankOptions.some(options=>!list(options))||question.type==='text'&&question.blankOptions.length!==fields.length||question.type!=='text'&&question.blankOptions.length)fail();
       if(question.type==='text'&&question.answer.length!==fields.length||['single','multiple'].includes(question.type)&&(question.options.length<2||fields.length!==question.options.length))fail();
-      const result=resolveAnswer({...question,targets:fields},{answer:question.answer});if(!result||result.answers.length!==question.answer.length)fail();
+      // Older verified records did not store a separate directions field.
+      // Preserve their submitted evidence; current live questions still apply
+      // their own format rules when matching or using those records.
+      const result=resolveAnswer({...question,directions:question.directions??'',targets:fields},{answer:question.answer});if(!result||result.answers.length!==question.answer.length)fail();
       if(question.type==='text'&&fields.some((field,i)=>JSON.stringify(field.choices?.map(choice=>choice.text)||[])!==JSON.stringify(question.blankOptions[i])))fail();
       if(question.mediaKeys!==undefined&&!list(question.mediaKeys,100))fail();
       if(question.images!==undefined&&(!Array.isArray(question.images)||!question.images.length||question.images.length>12))fail();
       const images=question.images?.map(ref=>{if(!ref||!text(ref.label,200)||!imageAssets.some(asset=>asset.digest===ref.digest))fail();usedImages.add(ref.digest);return {digest:ref.digest,label:ref.label};});
       if(images&&new Set(images.map(ref=>JSON.stringify(ref))).size!==images.length)fail();
-      return {question:question.question,type:question.type,options:[...question.options],context:question.context,wordBank:[...question.wordBank],blankOptions:question.blankOptions.map(options=>[...options]),fields,answer:result.answers,explanation:question.explanation||'',...(images?{images}:{}),...(question.type==='matching'?{prompts:[...question.prompts],promptEmphasis:question.promptEmphasis.map(words=>[...words])}:{}),...(question.id?{id:question.id}:{}),...(question.questionType?{questionType:question.questionType}:{}),...(question.mediaKeys?{mediaKeys:[...question.mediaKeys]}:{})};
+      return {question:question.question,type:question.type,options:[...question.options],context:question.context,...(question.directions!==undefined?{directions:question.directions}:{}),wordBank:[...question.wordBank],blankOptions:question.blankOptions.map(options=>[...options]),fields,answer:result.answers,explanation:question.explanation||'',...(images?{images}:{}),...(question.type==='matching'?{prompts:[...question.prompts],promptEmphasis:question.promptEmphasis.map(words=>[...words])}:{}),...(question.id?{id:question.id}:{}),...(question.questionType?{questionType:question.questionType}:{}),...(question.mediaKeys?{mediaKeys:[...question.mediaKeys]}:{})};
     });return {number:page.number,questions};
   });
   const verification=row.verification;
@@ -94,7 +122,7 @@ function exerciseAnswersIdentity(exercise){return JSON.stringify(exercise.pages.
 const blankOptionsFor=question=>question.blankOptions?.length?question.blankOptions:(question.targets||question.fields||[]).map(field=>field.choices?.map(choice=>choice.text)||[]);
 function exercisePartIdentity(question){
   const fields=question.targets||question.fields||[];
-  return [stem(question.question),question.type,normalize(question.context),question.type==='matching'?wordSet(question.options):optionSet(question.options),wordSet(question.wordBank),fields.length,question.type==='text'?blankOptionsFor(question).map(wordSet):[],question.questionType||'',question.type==='matching'?(matchingKeys(question)||[]).sort():[],(question.images||[]).map(image=>[image.digest,normalize(image.label)])];
+  return [stem(question.question),question.type,normalize(question.context),question.type==='matching'?wordSet(question.options):optionSet(question.options),wordSet(question.wordBank),fields.length,question.type==='text'?blankOptionsFor(question).map(wordSet):[],question.questionType||'',question.type==='matching'?(matchingKeys(question)||[]).sort():[],(question.images||[]).map(image=>[image.digest,normalize(image.label)]),standaloneDirections(question)];
 }
 function exerciseIdentity(exercise){return JSON.stringify([exercise.scope,exercise.pages.map(page=>page.questions.map(exercisePartIdentity))]);}
 const exerciseAnswerIdentity=answer=>answer.ordered?['ordered',answer.answers.map(normalize)]:answer.indexes.length?['choices',answer.indexes.slice().sort((a,b)=>a-b)]:['text',answer.answers.map(normalize)];
@@ -122,6 +150,7 @@ const optionSet = options => JSON.stringify((options||[]).map(optionText).sort()
 function matchesIdentity(question,row) {
   if(question.images?.length)return false;
   if(row.type&&row.type!==question.type)return false;
+  if(standaloneDirections(question)!==standaloneDirections(row))return false;
   if(question.type==='matching'&&(!matchingKeys(question)||!matchingKeys(row)||JSON.stringify(matchingKeys(question).sort())!==JSON.stringify(matchingKeys(row).sort())))return false;
   if(row.options&&optionSet(row.options)!==optionSet(question.options))return false;
   if(Object.entries(row.scope||{}).some(([key,value])=>value!==question.scope?.[key]))return false;
@@ -129,7 +158,7 @@ function matchesIdentity(question,row) {
   return true;
 }
 function questionSignature(questions) {
-  return JSON.stringify(questions.map(q=>[stem(q.question),q.options,q.type,normalize(q.context),q.targets?.map(target=>[target.kind,target.key,target.choices,target.inputMode,target.items?.map(item=>[item.key,item.text])]),q.id,q.wordBank,q.blankOptions,q.mediaKeys,q.scope,q.questionType,q.prompts,q.promptEmphasis,q.imageKeys,(q.images||[]).map(image=>[image.digest,image.label])]));
+  return JSON.stringify(questions.map(q=>[stem(q.question),q.options,q.type,normalize(q.context),q.targets?.map(target=>[target.kind,target.key,target.choices,target.inputMode,target.items?.map(item=>[item.key,item.text])]),q.id,q.wordBank,q.blankOptions,q.mediaKeys,q.scope,q.questionType,q.prompts,q.promptEmphasis,q.imageKeys,(q.images||[]).map(image=>[image.digest,image.label]),normalize(q.directions)]));
 }
 function resolveAnswer(question, row) {
   if(question.type==='matching'){
@@ -142,6 +171,8 @@ function resolveAnswer(question, row) {
   }
   if (question.type==='text'||!question.options?.length) {
     if(question.targets?.length&&row.answer.length!==question.targets.length)return null;
+    const requirements=textAnswerRequirements(question);
+    if(requirements){const answers=labelAnswers(row.answer,requirements);return answers?{answers,indexes:[]}:null;}
     const answers=[];
     for(const [i,value] of row.answer.entries()){
       const choices=question.targets?.[i]?.choices;
@@ -183,11 +214,11 @@ function parseModelAnswer(content, question) {
   if(data&&typeof data==='object'&&!Array.isArray(data)&&(data.status==='missing_material'||Array.isArray(data.answers)&&data.answers.length===0))throw Object.assign(new Error('AI 未给出可用答案（返回空答案或报告材料不足），请核对题目所需信息与实际材料。'),{code:'AI_MISSING_MATERIAL'});
   if (!data||typeof data!=='object'||Array.isArray(data)||!Array.isArray(data.answers))throw new Error('AI 返回的答案格式无效：answers 必须是文本数组。');
   if(!data.answers.every(x => typeof x === 'string' && x.trim()&&x.length<=20000))throw new Error('AI 返回的答案格式无效：每个答案必须是非空文本且不超过长度限制。');
-  if(question.type==='text'&&question.targets?.length&&data.answers.length!==question.targets.length)throw new Error(`AI 答案数量（${data.answers.length}）与页面空格数量（${question.targets.length}）不一致，已停止填答。`);
+  if(question.type==='text'&&question.targets?.length&&data.answers.length!==question.targets.length){const error=new Error(`AI 答案数量（${data.answers.length}）与页面空格数量（${question.targets.length}）不一致，已停止填答。`);if(textAnswerRequirements(question))error.code='AI_ANSWER_REQUIREMENTS';throw error;}
   if(question.type==='matching'&&data.answers.length!==question.prompts?.length)throw new Error(`AI 配对数量（${data.answers.length}）与左侧句子数量（${question.prompts?.length}）不一致，已停止填答。`);
   // Model must return option text, never assume its letter order.
   const result = resolveAnswer(question, { answer: data.answers });
-  if (!result) throw new Error('AI 答案与当前选项不一致，已停止填答。');
+  if (!result){const requirements=textAnswerRequirements(question);if(requirements)throw Object.assign(new Error('AI 答案不符合题目要求：须填写题目词库对应的大写字母'+(requirements.allowReuse?'。':'，且选项不得重复。')),{code:'AI_ANSWER_REQUIREMENTS'});throw new Error('AI 答案与当前选项不一致，已停止填答。');}
   return { ...result, source: 'AI', explanation: String(data.explanation || '') };
 }
 function cleanCourseGroup(group) {
@@ -211,4 +242,4 @@ function mergeCourses(old, incoming) {
   return [...map.values()];
 }
 
-export { normalize, stem, optionText, hash, safeCourseUrl, validateEndpoint, validateBank, validateExercise, exerciseIdentity, exerciseAnswersIdentity, matchingPromptKey, questionPartCount, matchExercisePage, buildBankIndex, resolveAnswer, matchAnswer, parseModelAnswer, mergeCourses,courseGroupKey,courseLabel,questionSignature };
+export { normalize, stem, optionText, hash, safeCourseUrl, validateEndpoint, validateBank, validateExercise, exerciseIdentity, exerciseAnswersIdentity, matchingPromptKey, questionPartCount, matchExercisePage, buildBankIndex, resolveAnswer, matchAnswer, parseModelAnswer, mergeCourses,courseGroupKey,courseLabel,questionSignature,textAnswerRequirements };

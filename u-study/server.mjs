@@ -11,13 +11,16 @@ import * as UStudy from './shared/core.mjs';
 import {validateSettings} from './settings.mjs';
 import {OperationManager} from './operation-manager.mjs';
 import {createStateHub} from './state-events.mjs';
-import {assertRuntime,APP_VERSION} from './runtime-check.mjs';
+import {assertRuntime,APP_VERSION,APP_INFO,sourceBuildId} from './runtime-check.mjs';
 import {StudyTimeController} from './study-time.mjs';
 import {handleStudyTimeRequest} from './study-time-http.mjs';
 import {sharedStudyTimeBrowserAccess} from './study-time-browser.mjs';
 export {validateSettings} from './settings.mjs';
 
 const ROOT=path.dirname(fileURLToPath(import.meta.url));
+// Capture the loaded build once; a health request must not identify old code
+// as current merely because its source files were updated on disk.
+const BUILD_ID=await sourceBuildId(ROOT);
 const MAX_BODY=9*1024*1024;
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml','.png':'image/png'};
 const securityHeaders={
@@ -36,11 +39,13 @@ function resolveAPIKey(value,endpoint,store){
   }
   return provided||(endpoint===store.keyEndpoint?store.apiKey:'');
 }
-export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,'dist'),onShutdown,testConnection=testAIConnection,studyTime}){
+export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,'dist'),beforeShutdown,onShutdown,testConnection=testAIConnection,studyTime}){
   const hub=createStateHub(store);
   const learning=studyTime||new StudyTimeController({directory:path.join(store.directory||path.join(ROOT,'.runtime'),'study-time'),courses:()=>store.data.courses,browserAccess:sharedStudyTimeBrowserAccess(automation)});
   const operations=automation.operations||new OperationManager(operation=>{store.operation=operation;store.changed({persist:false});});
-  let aiTesting=false;
+  let aiTesting=false,closing=false,shutdownScheduled=false,shutdownPreparation,closePromise;
+  const requestControllers=new Set();
+  const queueShutdown=()=>{if(shutdownScheduled)return;shutdownScheduled=true;setImmediate(()=>{void Promise.resolve().then(onShutdown).catch(error=>console.error(error.message));});};
   const server=http.createServer(async(req,res)=>{
     try{
       const actualPort=server.address()?.port||port;
@@ -54,8 +59,9 @@ export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,
           const origins=new Set([`http://127.0.0.1:${actualPort}`,`http://localhost:${actualPort}`]);
           if(req.headers['x-ustudy']!=='1'||!String(req.headers['content-type']||'').startsWith('application/json')||(req.headers.origin&&!origins.has(req.headers.origin))){json(res,403,{error:'请求来源验证失败。'});return;}
         }
+        if(closing&&!['/api/shutdown','/api/health','/api/state'].includes(pathname)){json(res,503,{error:'程序正在安全退出，请稍候。'});return;}
         if(pathname.startsWith('/api/study-time/')){await handleStudyTimeRequest(req,res,pathname,learning,json);return;}
-        if(req.method==='GET'&&pathname==='/api/health'){json(res,200,{ok:true,app:'u-study',version:APP_VERSION});return;}
+        if(req.method==='GET'&&pathname==='/api/health'){json(res,200,{ok:true,app:'u-study',...APP_INFO,buildId:BUILD_ID,instanceId:store.instanceId,closing});return;}
         if(req.method==='GET'&&pathname==='/api/state'){json(res,200,store.publicState());return;}
         if(req.method==='GET'&&pathname==='/api/bank/export'){json(res,200,store.data.bank);return;}
         if(req.method==='GET'&&pathname==='/api/events'){
@@ -65,7 +71,11 @@ export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,
         const input=await body(req,pathname==='/api/settings'?128*1024*1024:MAX_BODY);
         if(pathname==='/api/shutdown'){
           if(typeof onShutdown!=='function'){json(res,503,{error:'当前服务不支持通过启动器关闭。'});return;}
-          res.once('finish',()=>setImmediate(onShutdown));json(res,202,{accepted:true});return;
+          closing=true;
+          if(beforeShutdown)await (shutdownPreparation||=Promise.resolve().then(beforeShutdown).catch(error=>{shutdownPreparation=null;throw error;}));
+          if(res.destroyed){queueShutdown();return;}
+          res.once('finish',queueShutdown);res.once('close',queueShutdown);
+          json(res,202,{accepted:true,...(beforeShutdown?{saved:true}:{})});return;
         }
         if(pathname==='/api/connect'){json(res,200,await automation.connect());return;}
         if(pathname==='/api/lesson/inspect'){
@@ -76,8 +86,8 @@ export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,
           for(const [name,max] of [['courseId',2000],['unitId',200],['entryKey',5000]])if(typeof input[name]!=='string'||!input[name]||input[name].length>max)throw new Error('请提供有效的课程、单元和目录项目。');
           if(input.solve!==undefined&&typeof input.solve!=='boolean')throw new Error('答案预览开关无效。');
           if(input.inspect!==undefined&&typeof input.inspect!=='boolean'||input.inspect&&input.solve)throw new Error('只读页面检测参数无效。');
-          const controller=new AbortController(),onClose=()=>{if(!res.writableFinished)controller.abort();};res.once('close',onClose);
-          try{const result=await automation.previewMedia(input,{signal:controller.signal});if(!res.destroyed)json(res,200,result);}catch(error){if(!error.mediaChange)throw error;json(res,error.status||400,{error:error.message,mediaChange:error.mediaChange});}finally{res.off('close',onClose);}return;
+          const controller=new AbortController(),onClose=()=>{if(!res.writableFinished)controller.abort();};requestControllers.add(controller);res.once('close',onClose);
+          try{const result=await automation.previewMedia(input,{signal:controller.signal});if(!res.destroyed)json(res,200,result);}catch(error){if(!error.mediaChange)throw error;json(res,error.status||400,{error:error.message,mediaChange:error.mediaChange});}finally{requestControllers.delete(controller);res.off('close',onClose);}return;
         }
         if(pathname==='/api/sync'){automation.startSync();json(res,202,{accepted:true});return;}
         if(pathname==='/api/open-course'){
@@ -90,9 +100,9 @@ export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,
           const apiKey=resolveAPIKey(input.apiKey,settings.endpoint,store);
           if(!apiKey)throw new Error('请填写 API Key；切换接口后需填写对应的 Key。');
           const controller=new AbortController(),onClose=()=>{if(!res.writableFinished)controller.abort();};
-          aiTesting=true;res.once('close',onClose);
+          aiTesting=true;requestControllers.add(controller);res.once('close',onClose);
           try{const result=await testConnection({endpoint:settings.endpoint,model:settings.model,apiKey},{signal:controller.signal});if(!res.destroyed)json(res,200,result);}
-          finally{aiTesting=false;res.off('close',onClose);}
+          finally{aiTesting=false;requestControllers.delete(controller);res.off('close',onClose);}
           return;
         }
         if(pathname==='/api/settings'){
@@ -112,9 +122,9 @@ export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,
         if(pathname==='/api/units'){
           if(input.unitId!==undefined&&(typeof input.unitId!=='string'||!input.unitId||input.unitId.length>200))throw new Error('单元标识无效。');
           const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(Object.assign(new Error('读取目录超时，请检查课程窗口后重试。'),{status:408})),55000);
-          timeout.unref();const onClose=()=>{if(!res.writableFinished)controller.abort();};res.once('close',onClose);
+          timeout.unref();requestControllers.add(controller);const onClose=()=>{if(!res.writableFinished)controller.abort();};res.once('close',onClose);
           try{const result=await automation.unitsForCourse(input.courseId,input.unitId,{signal:controller.signal});controller.signal.throwIfAborted();if(!res.destroyed)json(res,200,result);}
-          finally{clearTimeout(timeout);res.off('close',onClose);}return;
+          finally{clearTimeout(timeout);requestControllers.delete(controller);res.off('close',onClose);}return;
         }
         if(pathname==='/api/tasks'){
           if(typeof input.unitId!=='string'||!input.unitId||input.unitId.length>200)throw new Error('请先读取课程目录并选择一个单元。');
@@ -135,7 +145,11 @@ export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,
     }catch(error){if(res.destroyed)return;if(!res.headersSent)json(res,error.status||400,{error:error.message||'操作未完成。'});else res.end();}
   });
   server.on('close',()=>{hub.close();void learning.close().catch(()=>{});});
-  server.shutdown=async()=>{try{await learning.close();}finally{hub.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}};
+  server.prepareShutdown=()=>{
+    closing=true;for(const controller of requestControllers)controller.abort(new Error('程序正在安全退出。'));
+    return learning.close();
+  };
+  server.shutdown=()=>closePromise||=(async()=>{try{await server.prepareShutdown();}finally{hub.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}})();
   return server;
 }
 export function openDashboard(url){
@@ -148,17 +162,22 @@ export async function main(){
   assertRuntime();
   const port=Number(process.env.PORT||4173);if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('PORT 必须是 1024 到 65535 之间的端口。');
   const store=await new Store(path.join(ROOT,'.runtime')).load(),automation=new Automation(store);
-  let shuttingDown=false;
-  const shutdown=async()=>{
-    if(shuttingDown)return;shuttingDown=true;
-    const deadline=setTimeout(()=>process.exit(1),15000);deadline.unref();
-    try{await automation.close();await server.shutdown();process.exitCode=0;}
-    catch(error){console.error(error.message);process.exitCode=1;}
-    finally{clearTimeout(deadline);}
-  };
-  const server=createApp({store,automation,port,onShutdown:()=>{void shutdown();}});
+  let preparation,shutdownPromise,deadline;
+  const prepareShutdown=()=>preparation||=(async()=>{
+    deadline=setTimeout(()=>process.exit(1),20000);deadline.unref();
+    const results=await Promise.allSettled([automation.close(),server.prepareShutdown()]);
+    try{await store.flush();const failed=results.find(result=>result.status==='rejected');if(failed)throw failed.reason;}
+    catch(error){clearTimeout(deadline);preparation=null;throw error;}
+  })();
+  const shutdown=()=>shutdownPromise||=(async()=>{
+    let code=0;
+    try{await prepareShutdown();await server.shutdown();}
+    catch(error){console.error(error.message);code=1;try{await server.shutdown();}catch{}}
+    finally{clearTimeout(deadline);process.exit(code);}
+  })();
+  const server=createApp({store,automation,port,beforeShutdown:prepareShutdown,onShutdown:shutdown});
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
-  const url=`http://127.0.0.1:${port}`;console.log(`U Study v${APP_VERSION} 已启动：${url}\n无需浏览器扩展。双击「停止 U Study.cmd」可关闭后台服务。`);
+  const url=`http://127.0.0.1:${port}`;console.log(`U Study v${APP_VERSION} 已启动：${url}\n代码标识：${BUILD_ID.slice(0,12)}\n无需浏览器扩展。双击「停止 U Study.cmd」可关闭后台服务。`);
   process.once('SIGINT',()=>{void shutdown();});process.once('SIGTERM',()=>{void shutdown();});
   if(process.argv.includes('--open'))await openDashboard(url);
   return {server,store,automation};

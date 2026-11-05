@@ -26,6 +26,9 @@ import {backgroundBrowserCases} from './background-browser.mjs';
 import {studyNoticeBrowserCases} from './study-notice-browser.mjs';
 import {videoFramesBrowserCases} from './video-frames-browser.mjs';
 import {lessonActionsBrowserCases} from './lesson-actions-browser.mjs';
+import {answerBlockerBrowserCases} from './answer-blocker-browser.mjs';
+import {bankedClozeBrowserCases} from './banked-cloze-browser.mjs';
+import {shutdownBrowserCases} from './shutdown-browser.mjs';
 import {discussionBoardBrowserCases} from './discussion-board-browser.mjs';
 import {aiRecoveryBrowserCases} from './ai-recovery-browser.mjs';
 import {videoCorrectionBrowserCases} from './video-correction-browser.mjs';
@@ -34,8 +37,10 @@ import {submissionCompletionBrowserCases} from './submission-completion-browser.
 import {correctionCoverageBrowserCases} from './correction-coverage-browser.mjs';
 import {textInputBrowserCases} from './text-input-browser.mjs';
 import {readingDiscussionBrowserCases} from './reading-discussion-browser.mjs';
+import {sentenceCreationBrowserCases} from './sentence-creation-browser.mjs';
 import {vocabularyBrowserCases} from './vocabulary-browser.mjs';
 import {videoViewBrowserCases} from './video-view-browser.mjs';
+import {audioViewBrowserCases} from './audio-view-browser.mjs';
 import {dropdownBrowserCases} from './dropdown-browser.mjs';
 import {oralBrowserCases} from './oral-browser.mjs';
 import {roleplayBrowserCases} from './roleplay-browser.mjs';
@@ -63,7 +68,7 @@ test('isolated real-browser integration',async t=>{
   const base=`http://127.0.0.1:${server.address().port}`,fixtureBase=`http://127.0.0.1:${fixture.address().port}`;
   let context;
   try{
-    context=await chromium.launchPersistentContext(path.join(directory,'browser'),{channel:process.env.USTUDY_TEST_BROWSER||'msedge',headless:true,chromiumSandbox:true,timeout:20000});
+    context=await chromium.launchPersistentContext(path.join(directory,'browser'),{channel:process.env.USTUDY_TEST_BROWSER||'msedge',headless:true,chromiumSandbox:true,timeout:20000,args:['--disable-features=MediaSessionService,HardwareMediaKeyHandling,AudioFocusEnforcement']});
     await context.route('**/*',route=>{
       const url=route.request().url();
       if(url.startsWith('https://ucontent.unipus.cn/offline-tab-test/'))return route.fulfill({contentType:'text/html',body:'<!doctype html><html><body><p>Offline exercise</p><textarea id="answer"></textarea><div contenteditable="true" id="essay"></div></body></html>'});
@@ -256,10 +261,15 @@ test('isolated real-browser integration',async t=>{
     await correctionCoverageBrowserCases(t,context,directory);
     await textInputBrowserCases(t,context,directory);
     await lessonActionsBrowserCases(t,context,directory);
+    await answerBlockerBrowserCases(t,context);
+    await bankedClozeBrowserCases(t,context,directory);
+    await shutdownBrowserCases(t,context,directory);
     await discussionBoardBrowserCases(t,context,directory);
     await readingDiscussionBrowserCases(t,context);
+    await sentenceCreationBrowserCases(t,context);
     await vocabularyBrowserCases(t,context,directory);
     await videoViewBrowserCases(t,context,directory);
+    await audioViewBrowserCases(t,context,directory);
     await courseNavigationBrowserCases(t,context);
     await oralBrowserCases(t,context,directory);
     await roleplayBrowserCases(t,context,directory);

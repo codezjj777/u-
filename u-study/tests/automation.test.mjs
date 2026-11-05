@@ -8,6 +8,74 @@ import {AIRequestError} from '../answer-provider.mjs';
 import '../dist/core.js';
 function fixture(){const store={directory:'.cache',data:{tasks:[],courses:[],bank:[],settings:{}},changed(){},addLog(task,message,level='info'){task.logs.push({message,level});},addActivity(){},notice(){}};const engine=new Automation(store);engine.readExerciseFeedback=async()=>({summary:false,failed:false});engine.waitSubmissionFeedback=async()=>({summary:false,failed:false});engine.verifyQuestion=async()=>{};return {engine,store};}
 
+test('a blocked lesson operation gets one fresh notice check and one retry before its remaining error is returned',async()=>{
+  const {engine}=fixture(),task={status:'running',logs:[]},page={url:()=> 'https://ucontent.unipus.cn/exercise-1'},signal=new AbortController().signal;let attempts=0,checks=0;
+  const first=Object.assign(new Error('blocked first'),{code:'LESSON_ACTION_BLOCKED'}),last=Object.assign(new Error('still blocked'),{code:'LESSON_ACTION_BLOCKED'});
+  engine.dismissStudyNotice=async()=>{checks++;return false;};
+  await assert.rejects(engine.withStudyNoticeRecovery(task,page,signal,async()=>{if(++attempts===1)throw first;throw last;}),error=>error===last);assert.equal(attempts,2);assert.equal(checks,1);assert.equal(task.status,'running');
+});
+test('notice recovery cannot retry an operation after cancellation or page navigation',async()=>{
+  for(const kind of ['stop','navigate']){
+    const {engine}=fixture(),task={status:'running',logs:[]},controller=new AbortController();let url='https://ucontent.unipus.cn/exercise-1',attempts=0,checks=0;
+    const page={url:()=>url},blocked=Object.assign(new Error('blocked'),{code:'LESSON_ACTION_BLOCKED'});
+    engine.dismissStudyNotice=async()=>{checks++;if(kind==='stop')controller.abort(new Error('stop-recovery'));else url='https://ucontent.unipus.cn/another-exercise';return true;};
+    await assert.rejects(engine.withStudyNoticeRecovery(task,page,controller.signal,async()=>{attempts++;throw blocked;}),error=>kind==='stop'?error.message==='stop-recovery':error===blocked);assert.equal(attempts,1);assert.equal(checks,1);
+  }
+});
+test('entry notice recovery is bounded and unrelated errors do not trigger another notice action',async()=>{
+  const {engine}=fixture(),task={status:'running',logs:[]},page={url:()=> 'https://ucontent.unipus.cn/exercise-1'},signal=new AbortController().signal;let checks=0;
+  engine.dismissStudyNotice=async()=>{if(++checks===1)throw Object.assign(new Error('notice close interrupted'),{code:'LESSON_ACTION_BLOCKED'});return true;};
+  assert.equal(await engine.withStudyNoticeRecovery(task,page,signal,()=>engine.dismissStudyNotice(task,page,signal),{noticeOnly:true}),true);assert.equal(checks,2);
+  const unrelated=new Error('question changed');await assert.rejects(engine.withStudyNoticeRecovery(task,page,signal,async()=>{throw unrelated;}),error=>error===unrelated);assert.equal(checks,2);
+});
+
+test('entry preflight catches a delayed notice inside the short settle window',async()=>{
+  const {engine}=fixture(),task={status:'running',logs:[]},page={frames:()=>[]};let visible=false,clicks=0;
+  engine.dismissStudyNotice=async()=>{if(!visible)return false;visible=false;clicks++;return true;};
+  const late=setTimeout(()=>{visible=true;},20);
+  try{assert.equal(await engine.prepareLessonEntry(task,page,new AbortController().signal,{settleMs:65,pollMs:5}),true);assert.equal(clicks,1);assert.equal(visible,false);}
+  finally{clearTimeout(late);}
+});
+
+test('a notice on the next exercise page is acknowledged before reading its new questions',async()=>{
+  const {engine}=fixture(),url='https://ucontent.unipus.cn/offline-recognition/next-page',page={url:()=>url,isClosed:()=>false},task={status:'running',logs:[]};let notice=true,clicks=0,reads=0;
+  const navigation={known:true,key:'same-entry',title:'Exercise'},previous={signature:'old',navigation,pageURL:url},next={signature:'new',navigation,pageURL:url,questions:[{question:'Choose.'}]};
+  engine.readLearningState=async()=>({studyNotice:notice});engine.dismissStudyNotice=async()=>{notice=false;clicks++;return true;};engine.readQuestions=async()=>{assert.equal(notice,false);reads++;return next;};
+  const result=await engine.waitNextExercisePage(task,page,{},previous,new AbortController().signal,{timeout:2000});assert.equal(result.snapshot,next);assert.equal(result.boundary,false);assert.equal(clicks,1);assert.equal(reads,2);
+});
+
+test('an AI pending watcher handles the page before the original answer is available and then stops polling',async()=>{
+  const {engine}=fixture(),signal=new AbortController().signal;let resolve,checks=0,requests=0;
+  const answer={answers:['retained']},pending=new Promise(done=>{resolve=done;});
+  const result=await engine.withAIStudyNoticeWatch({frames:()=>[]},signal,async requestSignal=>{requests++;assert.equal(requestSignal.aborted,false);return pending;},async(watchSignal,options)=>{checks++;assert.equal(watchSignal.aborted,false);assert.equal(options.readContent,false);resolve(answer);},{pollMs:1});
+  assert.equal(result,answer);assert.equal(requests,1);const count=checks;await sleep(15);assert.equal(checks,count);
+});
+
+test('a page change detected while AI is pending aborts that request without another attempt',async()=>{
+  const {engine}=fixture(),changed=new Error('fixture-page-changed');let requests=0,aborted=false;
+  await assert.rejects(engine.withAIStudyNoticeWatch({frames:()=>[]},new AbortController().signal,requestSignal=>{requests++;return new Promise((_,reject)=>requestSignal.addEventListener('abort',()=>{aborted=true;reject(requestSignal.reason);},{once:true}));},async()=>{throw changed;},{pollMs:1}),error=>error===changed);
+  assert.equal(requests,1);assert.equal(aborted,true);
+});
+
+test('stopping an AI wait interrupts a watcher in the review gate even when its request adapter ignores abort',async()=>{
+  const {engine}=fixture(),controller=new AbortController(),task={status:'review'};let entered;
+  const reviewing=new Promise(resolve=>{entered=resolve;}),pending=engine.withAIStudyNoticeWatch({frames:()=>[]},controller.signal,()=>new Promise(()=>{}),async watchSignal=>{entered();await engine.gate(task,watchSignal);},{pollMs:1});
+  await reviewing;controller.abort(new Error('fixture-stop-ai-watch'));await assert.rejects(pending,/fixture-stop-ai-watch/);
+});
+
+test('a completed AI response is retained when stopping its watcher interrupts a notice review gate',async()=>{
+  const {engine}=fixture(),task={status:'review'};let entered,resolve;
+  const reviewing=new Promise(done=>{entered=done;}),answer={answers:['retained']},response=new Promise(done=>{resolve=done;});
+  const pending=engine.withAIStudyNoticeWatch({frames:()=>[]},new AbortController().signal,()=>response,async watchSignal=>{entered();await engine.gate(task,watchSignal);},{pollMs:1});
+  await reviewing;resolve(answer);assert.equal(await pending,answer);assert.equal(task.status,'review');
+});
+
+test('a rejected AI request stops the pending watcher without another page check',async()=>{
+  const {engine}=fixture(),failure=new AIRequestError('fixture-provider-failed',{code:'AI_TIMEOUT',retryable:true});let checks=0;
+  await assert.rejects(engine.withAIStudyNoticeWatch({frames:()=>[]},new AbortController().signal,async()=>{throw failure;},async()=>{checks++;},{pollMs:1}),error=>error===failure);
+  await sleep(15);assert.equal(checks,0);
+});
+
 test('browser launches with its sandbox enabled, including a fallback browser',async t=>{
   const previous=process.env.USTUDY_BROWSER;delete process.env.USTUDY_BROWSER;
   t.after(()=>{if(previous===undefined)delete process.env.USTUDY_BROWSER;else process.env.USTUDY_BROWSER=previous;});

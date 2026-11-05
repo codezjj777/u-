@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile,writeFile,rm,stat} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,rm,stat,mkdir,copyFile,appendFile} from 'node:fs/promises';
 import path from 'node:path';
-import {assertRuntime,rotateLogs,APP_VERSION} from '../runtime-check.mjs';
+import {assertRuntime,rotateLogs,APP_VERSION,sourceBuildId} from '../runtime-check.mjs';
 import {releaseFiles} from '../release-files.mjs';
 import {showBrowserPage,createBackgroundPage} from '../browser-session.mjs';
 
@@ -49,5 +49,16 @@ test('log rotation keeps bounded old logs without touching other local files',as
     for(const [name,value] of [['server.log','current log'],['server.log.1','first backup'],['server.log.2','second backup']])await writeFile(path.join(directory,name),value);
     await rotateLogs(directory,{maxBytes:4});
     assert.equal(await readFile(path.join(directory,'server.log.1'),'utf8'),'current log');assert.equal(await readFile(path.join(directory,'server.log.3'),'utf8'),'second backup');assert.equal(await readFile(path.join(directory,'unrelated.json'),'utf8'),'keep');
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+test('build identity detects same-version code and dependency edits while excluding local data and documentation',async()=>{
+  const directory=await mkdtemp(path.resolve('.cache/build-id-'));
+  try{
+    await Promise.all(releaseFiles.map(async file=>{const target=path.join(directory,file);await mkdir(path.dirname(target),{recursive:true});await copyFile(new URL('../'+file,import.meta.url),target);}));
+    const initial=await sourceBuildId(directory);assert.equal(initial,await sourceBuildId());assert.match(initial,/^[a-f0-9]{64}$/);
+    await mkdir(path.join(directory,'.runtime'));await writeFile(path.join(directory,'.runtime/state.json'),'private local data');await appendFile(path.join(directory,'README.md'),'\nDocumentation edit');assert.equal(await sourceBuildId(directory),initial);
+    await appendFile(path.join(directory,'lesson-actions.mjs'),'\n// Same version, updated behavior\n');const changed=await sourceBuildId(directory);assert.notEqual(changed,initial);
+    await appendFile(path.join(directory,'package-lock.json'),'\n');assert.notEqual(await sourceBuildId(directory),changed);
+    await rm(path.join(directory,'lesson-actions.mjs'));await assert.rejects(sourceBuildId(directory),error=>error.code==='ENOENT');
   }finally{await rm(directory,{recursive:true,force:true});}
 });

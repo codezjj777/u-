@@ -10,6 +10,7 @@
     leaf:'<path d="M20 3C6 2 2 8 5 16c8 5 16-1 15-13Z"/><path d="M3 21 15 9M9 15v-5m0 5h5"/>',
     settings:'<path d="m9 3-.6 2.2-2 .9-2-.6-2 3.4 1.5 1.6v2.3l-1.5 1.5 2 3.5 2.1-.6 1.9 1 .6 2.2h4l.6-2.2 2-1 2 .6 2-3.5-1.5-1.5v-2.3l1.5-1.6-2-3.4-2.1.6-1.9-.9L13 3H9Z"/><circle cx="11" cy="12" r="3"/>',
     help:'<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 2-2.5 3.5M12 17h.01"/>',
+    power:'<path d="M12 3v9M6.3 5.8a8.5 8.5 0 1 0 11.4 0"/>',
     refresh:'<path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/>',
     info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
     'arrow-right':'<path d="M4 12h16m-6-6 6 6-6 6"/>',
@@ -54,6 +55,7 @@
   const progressRefreshAttempts=new Map(),recentlyFinishedTasks=new Set();
   let aiTestController = null;
   let settingsServiceError=false,aiServiceError=false;
+  let shutdownRequested=false,shutdownPending=false,shutdownComplete=false,shutdownController=null;
   const service=UStudyService.createClient({onState:acceptState,onNotice:notice=>toast(notice.message),onConnectionChange:handleServiceConnection});
   const activeStatuses = new Set(['waiting','running','paused','review','stopping']);
   const statusNames = {waiting:'读取必修目录',running:'正在处理必修',paused:'已暂停',review:'等待核对',partial:'有待手动项目',completed:'已完成',failed:'需要处理',stopped:'已停止',stopping:'正在停止'};
@@ -66,7 +68,26 @@
   const tasks = () => demo ? (demoTask ? [demoTask] : []) : state.tasks;
   function toast(message) { const el = $('#toast'); el.textContent = message; el.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(()=>el.classList.remove('show'),6000); }
   async function api(path, data, method = 'POST', signal) {
+    if(shutdownRequested)throw new Error('程序正在安全退出。');
     return service.request(path,data,method,signal);
+  }
+  async function safeExit(){
+    if(shutdownPending||shutdownComplete)return;
+    shutdownRequested=true;shutdownPending=true;shutdownController=new AbortController();
+    $('#safe-exit').disabled=true;$('.app-shell').inert=true;$('#shutdown-overlay').hidden=false;$('#shutdown-overlay').dataset.state='busy';
+    $('#shutdown-title').textContent='正在安全退出';$('#shutdown-message').textContent='正在停止任务、保存数据并关闭学习窗口，请稍候。';$('#shutdown-symbol').classList.add('spinning');$('#shutdown-retry').hidden=true;$('#shutdown-panel').focus?.();
+    clearTimeout(demoTimer);aiTestController?.abort();window.dispatchEvent(new window.Event('ustudy-shutdown'));
+    try{
+      const result=await service.shutdown({signal:shutdownController.signal,onProgress:phase=>{
+        if(phase==='stopping')$('#shutdown-message').textContent='正在等待后台程序完全退出，请稍候。';
+      }});
+      shutdownComplete=true;$('#shutdown-overlay').dataset.state='done';$('#shutdown-title').textContent='程序已安全退出';$('#shutdown-symbol').innerHTML=icon('check');
+      $('#shutdown-message').textContent=(result.saved?'学习记录已保存。':'')+'后台程序已停止，可以关闭此页面。下次使用时请双击「一键启动.cmd」。';$('#connection-state').textContent='程序已退出';
+      setTimeout(()=>{if(typeof window.close==='function')window.close();},350);
+    }catch(error){
+      service.stop();
+      $('#shutdown-overlay').dataset.state='error';$('#shutdown-title').textContent='安全退出尚未完成';$('#shutdown-message').textContent=error.message||'请重试退出，或运行「一键停止.cmd」。';$('#shutdown-retry').hidden=false;$('#shutdown-retry').focus?.();
+    }finally{shutdownPending=false;$('#shutdown-symbol').classList.remove('spinning');}
   }
   function renderServiceStatus(){
     renderKeyStatus();
@@ -89,7 +110,7 @@
     $('#api-key-status').textContent=state.keyPresent?(state.keySource==='environment'?'正在使用环境变量 Key':state.keySource==='local'?'Key 已保存在本机，重启后自动恢复':'当前 Key 仅在旧服务内存中，新版需保存一次以保留到本机'):'开发阶段：保存到本机 .runtime/credentials.json，发布前再调整密钥管理';
   }
   function handleServiceConnection(available){
-    apiAvailable=available;renderServiceStatus();
+    apiAvailable=available;if(shutdownRequested){$('#connection-state').textContent=shutdownComplete?'程序已退出':'正在安全退出';return;}renderServiceStatus();
     if(available){
       if(settingsServiceError){$('#settings-error').hidden=true;settingsServiceError=false;}
       if(aiServiceError){$('#ai-test-result').hidden=true;aiServiceError=false;}
@@ -290,6 +311,7 @@
     try{await api(`/tasks/${encodeURIComponent(current.id)}/${action}`,{});}catch(e){toast(e.message);}
   }
   document.addEventListener('click',async e=>{
+    if(shutdownRequested)return;
     const close=e.target.closest('[data-close]');if(close){close.closest('dialog')?.close();return;}
     const nav=e.target.closest('[data-view]');if(nav){switchView(nav.dataset.view);return;}
     const f=e.target.closest('[data-filter]');if(f){filter=f.dataset.filter;renderCourses();return;}
@@ -299,6 +321,7 @@
     const open=e.target.closest('[data-open-course]');if(open){if(demo){toast('演示课程没有实际链接，连接 U校园后即可打开。');return;}if(open.disabled)return;open.disabled=true;try{toast('正在等待 U校园课程加载…');await api('/open-course',{courseId:open.dataset.openCourse});toast('已在独立窗口打开课程。');}catch(err){toast(err.message);}finally{open.disabled=false;}return;}
     const task=e.target.closest('[data-task-action]');if(task){if(task.disabled)return;task.disabled=true;try{await taskAction(task.dataset.taskAction);}finally{task.disabled=false;}return;}
     const actionButton=e.target.closest('[data-action]'),action=actionButton?.dataset.action;
+    if(action==='shutdown'){await safeExit();return;}
     if(action==='connect')openDialog('#connect-dialog');if(action==='settings')openSettings();if(action==='help')openDialog('#help-dialog');
     if(['sync','open-platform'].includes(action)){if(actionButton.disabled)return;actionButton.disabled=true;try{if(action==='sync')await syncCourses();else await openPlatform();}finally{actionButton.disabled=false;}}
   });
@@ -307,6 +330,7 @@
   $('#load-units').addEventListener('click',()=>loadUnits());$('#task-unit').addEventListener('change',()=>loadUnits($('#task-unit').value));
   $('#ai-enabled').addEventListener('change',()=>$('#ai-fields').classList.toggle('inactive',!$('#ai-enabled').checked));
   $('#test-ai-connection').addEventListener('click',testAIConnection);
+  $('#shutdown-retry').addEventListener('click',()=>{void safeExit();});
   $('#clear-manual-entries').addEventListener('click',async()=>{
     if($('#clear-manual-entries').disabled)return;
     manualEntriesClearing=true;renderServiceStatus();
@@ -344,8 +368,13 @@
   $$('dialog').forEach(d=>d.addEventListener('click',e=>{if(e.target===d){const r=d.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)d.close();}}));
   document.addEventListener('keydown',e=>{if(e.key==='/'&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)&&!document.querySelector('dialog[open]')){e.preventDefault();switchView('courses');$('#course-search').focus();}});
   function acceptState(next) {
+    if(shutdownRequested)return;
     const previous=state.lastSynced,previousTasks=new Map(state.tasks.map(task=>[task.id,task.status])),connectionChanged=state.connected!==next.connected||state.windowOpen!==next.windowOpen||state.syncing!==next.syncing;
     state={...state,...next};if(!state.windowOpen)recentlyFinishedTasks.clear();
+    const info=next.appInfo,modified=$('#app-modified');
+    $('#app-version').textContent=info?.version?`版本 v${info.version}`:'版本未知';
+    modified.textContent=info?.modifiedAt||'—';if(info?.modifiedAt)modified.setAttribute('datetime',info.modifiedAt);else modified.removeAttribute('datetime');
+    $('#app-build').title=info?'当前后台版本及最后修改日期':'当前后台未提供版本信息，请安全退出后重新启动。';
     for(const task of state.tasks)if(state.windowOpen&&['completed','partial'].includes(task.status)&&activeStatuses.has(previousTasks.get(task.id)))recentlyFinishedTasks.add(task.id);
     if(state.lastSynced&&state.lastSynced!==previous){setDemo(false);$('#connect-dialog').close();}else{if(connectionChanged)renderCourses();renderActivity();renderTasks();}renderServiceStatus();refreshFinishedCourseProgress();
   }
@@ -353,8 +382,8 @@
     hydrate();renderAll();
     void service.start().catch(()=>{});
   }
-  window.addEventListener('pagehide',()=>{service.stop();clearTimeout(demoTimer);});
-  window.addEventListener('pageshow',event=>{if(event.persisted)void service.start().catch(()=>{});});
-  for(const event of ['online','focus'])window.addEventListener(event,()=>{if(!service.isConnected())void service.ensureConnected().catch(()=>{});});
+  window.addEventListener('pagehide',()=>{service.stop();shutdownController?.abort();clearTimeout(demoTimer);});
+  window.addEventListener('pageshow',event=>{if(event.persisted&&!shutdownRequested)void service.start().catch(()=>{});});
+  for(const event of ['online','focus'])window.addEventListener(event,()=>{if(!shutdownRequested&&!service.isConnected())void service.ensureConnected().catch(()=>{});});
   initialize();
 })();

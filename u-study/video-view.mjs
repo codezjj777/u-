@@ -1,4 +1,4 @@
-import {setTimeout as sleep} from 'node:timers/promises';
+import {finishMediaPlayback,dragMediaProgress} from './media-playback.mjs';
 
 export const VIDEO_VIEW_HANDLER='video-view-v1';
 export function isVideoViewEntry(scope){
@@ -50,54 +50,5 @@ export function readVideoViewFromDOM(){
     controlHints:{player:root.className,play:plays.map(el=>el.className).slice(0,6),track:tracks.map(el=>el.className).slice(0,6),answerControls:fields.map(el=>el.className).slice(0,6),embeddedQuestion:!!embedded,classes:[...new Set([...root.querySelectorAll('[class]')].filter(el=>visible(el)&&!el.closest('.vjs-controls-disabled')).map(el=>String(el.className)).filter(name=>/play|progress|slider|control|seek|pause/i.test(name)))].slice(0,24)}};
 }
 
-const review=message=>Object.assign(new Error(message),{code:'VIDEO_VIEW_REVIEW'});
-const playedToEnd=state=>state.ended&&state.currentTime>=state.duration-.12&&(state.played||[]).some(([start,end])=>end>=state.duration-.12&&end-start>=Math.min(.05,state.duration/4));
-
-/** Only ordinary play/seek callbacks mutate the player; ended is read natively. */
-export async function finishVideoView({initial,read,play,pause,seek,checkpoint=async()=>{},onProgress=()=>{},signal,playTimeoutMs=10000,seekTimeoutMs=8000,endTimeoutMs=20000,pollMs=100}){
-  const check=async()=>{signal?.throwIfAborted();await checkpoint();signal?.throwIfAborted();};
-  if(!initial?.ready||!initial.binding||!(initial.duration>0))throw review(initial?.issue||'纯视频页尚未就绪。');
-  const binding=initial.binding,duration=initial.duration;
-  const bound=fresh=>{if(!fresh||fresh.binding!==binding)throw review('视频或当前目录项目发生变化，已停止播放处理。');if(fresh.requiresReview||fresh.error||fresh.loop||Math.abs((fresh.duration||0)-duration)>.15)throw review(fresh.issue||'视频状态或时长发生变化，已停止播放处理。');};
-  const wait=async(predicate,timeout,message)=>{
-    let elapsed=0;while(elapsed<timeout){await check();const started=Date.now(),fresh=await read();bound(fresh);if(predicate(fresh))return fresh;elapsed+=Date.now()-started;if(elapsed<timeout){const delay=Math.min(pollMs,timeout-elapsed);await sleep(delay,undefined,{signal});elapsed+=delay;}}
-    throw review(message);
-  };
-  const hold=async current=>{
-    if(current.paused||playedToEnd(current))return current;
-    if(!pause)throw review('视频正在播放，尚未确认暂停，已停止拖动处理。');
-    await check();await pause(current);
-    return wait(fresh=>playedToEnd(fresh)||fresh.paused,playTimeoutMs,'尚未确认视频暂停，已停止拖动处理。');
-  };
-  await check();let current=await read();bound(current);
-  if(playedToEnd(current))return {duration,seeked:false};
-  current=await hold(current);if(playedToEnd(current))return {duration,seeked:false};
-  let seeked=false;
-  if(!playedToEnd(current)&&duration>1.05&&current.currentTime<duration-1.05){
-    const target=duration-1;onProgress('seeking',current);
-    current=await wait(fresh=>!fresh.seeking&&(!Array.isArray(fresh.seekable)||fresh.seekable.some(([start,end])=>target>=start&&target<=end)),seekTimeoutMs,'视频尚不支持拖动到结束前一秒，请等待缓冲后重试。');
-    current=await hold(current);await check();await seek(current,target);seeked=true;
-    current=await wait(fresh=>!fresh.seeking&&!fresh.ended&&fresh.currentTime>=target-.55&&fresh.currentTime<=target+.55&&fresh.currentTime<duration-.025,seekTimeoutMs,'进度条未停在结束前约一秒，已停止处理，请核对视频。');
-    onProgress('seeked',current);
-  }
-  current=await hold(current);const start=current.currentTime;
-  if(!playedToEnd(current)){await check();await play(current);}
-  current=await wait(fresh=>playedToEnd(fresh)||!fresh.paused&&!fresh.seeking&&fresh.currentTime>start+.025,playTimeoutMs,'视频未确认开始播放，已停止处理，请检查播放器。');
-  onProgress('playing',current);
-  onProgress('waiting-end',current);current=await wait(playedToEnd,endTimeoutMs,'尚未确认视频自然播放结束，已保留视频页，请检查缓冲或播放状态。');
-  await check();const final=await read();bound(final);if(!playedToEnd(final))throw review('视频结束状态发生变化，尚未确认完成。');
-  onProgress('ended',final);return {duration,seeked};
-}
-
-export async function dragVideoProgress(page,frame,record,target,{signal,checkpoint=async()=>{}}={}){
-  signal?.throwIfAborted();await checkpoint();
-  if(!Number.isFinite(target)||target<0||target>=record.duration||Array.isArray(record.seekable)&&!record.seekable.some(([start,end])=>target>=start&&target<=end))throw review('当前视频尚不支持定位到结束前一秒，请等待缓冲或手动核对。');
-  const track=frame.locator(record.trackSelector);await track.scrollIntoViewIfNeeded({timeout:3000});
-  const box=await track.boundingBox();if(!box||box.width<20||box.height<=0)throw review('视频进度条尚不可定位。');
-  let start=record.thumbSelector?await frame.locator(record.thumbSelector).boundingBox():null;
-  const point=fraction=>({x:box.x+Math.max(.25,Math.min(box.width-.25,box.width*fraction)),y:box.y+box.height/2});
-  const from=start?{x:start.x+start.width/2,y:start.y+start.height/2}:point(record.currentTime/record.duration),to=point(target/record.duration);
-  await checkpoint();signal?.throwIfAborted();await page.mouse.move(from.x,from.y);await page.mouse.down();
-  try{signal?.throwIfAborted();await page.mouse.move(to.x,to.y,{steps:8});signal?.throwIfAborted();}
-  finally{await page.mouse.up();}
-}
+export const finishVideoView=options=>finishMediaPlayback({...options,kind:'video'});
+export const dragVideoProgress=(page,frame,record,target,options={})=>dragMediaProgress(page,frame,record,target,{...options,kind:'video'});

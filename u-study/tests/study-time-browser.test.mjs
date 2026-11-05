@@ -188,6 +188,90 @@ test('shared-window study-time browser and dashboard', { timeout: 180000 }, asyn
       await browser.stop(); assert.equal(page.isClosed(), true);
     } finally { browser.binding = previous; await page.close(); }
   });
+  await t.test('network interruption and repeated pauses resume after delayed content without counting recovery time or resetting credit', async () => {
+    const context = await browser.ensure(); let wall = 1000000, monotonic = 1000;
+    const recoveringBrowser = new StudyTimeBrowser(directory, { getContext: () => context, pollMs: 40 });
+    const controller = new StudyTimeController({ directory: path.join(directory, 'resume-test'), courses: () => [course], browser: recoveringBrowser,
+      pollMs: 1e8, now: () => wall, monotonic: () => monotonic });
+    try {
+      const catalog = await controller.loadCatalog({ courseId: course.id, unitId: 'id-unit2-tab' });
+      const started = await controller.start({ courseId: course.id, unitId: catalog.unitId, entryKey: catalog.entries[0].key, mode: 'platform-add', targetMinutes: 60, keepAlive: true });
+      await controller.preparing;
+      const task = controller.storage.tasks.find(task => task.id === started.id), page = recoveringBrowser.binding.page;
+      assert.equal(task.status, 'running'); const baseline = task.baselineSeconds, creditKey = task.creditKey;
+      wall += 5000; monotonic += 5000; await controller.tick(); assert.equal(task.elapsedMs, 5000);
+      await page.locator('main').evaluate(el => el.insertAdjacentHTML('beforeend', '<p>网络异常</p>'));
+      await controller.tick(); assert.equal(task.status, 'review'); assert.equal(recoveringBrowser.binding.suspended, true);
+      await page.route(fixtureBase + '/lesson?unit=2', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: lessonHTML('2') + `<script>
+        const content = document.querySelector('main'), nav = document.querySelector('nav'); content.hidden = true; nav.hidden = true;
+        setTimeout(() => { content.hidden = false; nav.hidden = false;
+          nav.insertAdjacentHTML('beforeend', '<span class="pc-header-task-activity">  Learning   objectives  </span>');
+        }, 300);
+      </script>` }));
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const elapsed = task.elapsedMs;
+        await controller.control(task.id, 'resume');
+        assert.equal(task.status, 'waiting'); wall += 600000; monotonic += 600000;
+        assert.equal(task.elapsedMs, elapsed); assert.equal((await controller.state()).dwellClock, null);
+        await controller.preparing;
+        assert.equal(task.status, 'running', task.logs.at(-1).message);
+        assert.equal(task.id, started.id); assert.equal(task.baselineSeconds, baseline); assert.equal(task.creditKey, creditKey);
+        assert.equal(recoveringBrowser.binding.page, page);
+        wall += 5000; monotonic += 5000; await controller.tick(); assert.equal(task.elapsedMs, elapsed + 5000);
+        if (attempt < 2) await controller.control(task.id, 'pause');
+      }
+      assert.equal(task.logs.some(log => /尚未就绪|内容已切换/.test(log.message)), false);
+    } finally { await controller.close(); }
+  });
+  await t.test('resume waits for loading headers on an existing tab and accepts only cosmetic breadcrumb changes', async () => {
+    const context = await browser.ensure(), page = await browser.newStudyPage(context), previous = browser.binding;
+    const task = { entryTitle: 'Learning objectives', unitId: 'id-unit2-tab' };
+    try {
+      await page.goto(fixtureBase + '/lesson?unit=2'); await browser.waitForActivity(page, task);
+      await page.evaluate(() => {
+        const nav = document.querySelector('nav'); nav.hidden = true;
+        document.querySelector('h1').textContent = 'Loading';
+        setTimeout(() => { nav.hidden = false; document.querySelector('h1').textContent = 'Learning   objectives';
+          nav.insertAdjacentHTML('beforeend', '<span class="pc-header-task-activity">Learning objectives</span>'); }, 300);
+      });
+      assert.equal((await browser.resume(course, task)).ready, true);
+      assert.equal((await browser.read()).ready, true);
+      await page.locator('nav').evaluate(el => el.insertAdjacentHTML('beforeend', '<span class="pc-header-tab-activity">Learning objectives</span>'));
+      assert.equal((await browser.read()).ready, true);
+      await page.locator('nav').evaluate(el => el.insertAdjacentHTML('afterbegin', '<span class="pc-header-task-activity">Learning objectives</span>'));
+      assert.equal((await browser.read()).ready, true);
+      const abort = new AbortController();
+      await page.evaluate(() => { document.querySelector('main').hidden = true; document.querySelector('nav').hidden = true; });
+      const timer = setTimeout(() => abort.abort(new Error('cancel resume')), 100);
+      try { await assert.rejects(browser.resume(course, task, abort.signal), error => error.name === 'AbortError' || /cancel resume/.test(error.message)); }
+      finally { clearTimeout(timer); }
+      assert.equal(page.isClosed(), false);
+    } finally { browser.binding = previous; await page.close(); }
+  });
+  await t.test('resume preserves the original course, unit and activity checks after reloading', async () => {
+    const context = await browser.ensure(), page = await browser.newStudyPage(context), previous = browser.binding, timeout = browser.activityTimeoutMs;
+    const task = { entryTitle: 'Learning objectives', unitId: 'id-unit2-tab' };
+    browser.activityTimeoutMs = 250;
+    try {
+      for (const [selector, text] of [['nav span:first-child', 'Another textbook'], ['nav span:nth-child(2)', 'Other unit'], ['h1', 'Other section']]) {
+        await page.goto(fixtureBase + '/lesson?unit=2'); await browser.waitForActivity(page, task);
+        const identity = browser.binding.identity;
+        await browser.suspend();
+        const route = route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: lessonHTML('2') + `<script>document.querySelector(${JSON.stringify(selector)}).textContent=${JSON.stringify(text)}</script>` });
+        await page.route(fixtureBase + '/lesson?unit=2', route);
+        await assert.rejects(browser.resume(course, task), /学习内容已切换/);
+        assert.equal(browser.binding.identity, identity); assert.equal(page.isClosed(), false);
+        await page.unroute(fixtureBase + '/lesson?unit=2', route);
+      }
+      await page.goto(fixtureBase + '/lesson?unit=2'); await browser.waitForActivity(page, task);
+      await page.setContent(`<iframe src="${fixtureBase}/lesson?unit=2&other-course=1" style="width:800px;height:400px"></iframe>`);
+      await page.frameLocator('iframe').locator('h1').waitFor();
+      await assert.rejects(browser.resume(course, task), /学习内容已切换/);
+      await page.goto(fixtureBase + '/lesson?unit=2'); await browser.waitForActivity(page, task);
+      await page.goto(fixtureBase + '/lesson?unit=1');
+      await assert.rejects(browser.resume(course, task), /地址已变化/);
+    } finally { browser.activityTimeoutMs = timeout; browser.binding = previous; await page.close(); }
+  });
   await t.test('the existing logged-in window opens the selected page in its own tab without another browser or popup', async () => {
     await dashboard.locator('[data-study-time-action="window"]').click();
     await dashboard.locator('[data-study-time-action="catalog"]:enabled').waitFor(); await dashboard.locator('[data-study-time-action="catalog"]').click();

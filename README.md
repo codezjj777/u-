@@ -2,15 +2,15 @@
 
 Windows 本地运行的课程与学习工作台，支持课程同步、单元目录、题库匹配和 AI 辅助填答。通过独立的 Edge / Chrome 窗口登录，工作台和个人数据保存在自己的电脑上。
 
-**当前版本：1.4.20** · [下载最新版](https://github.com/codezjj777/u-/releases/latest) · [详细使用说明](u-study/README.md) · [发布与公开仓库](docs/RELEASING.md)
+**当前版本：1.4.30** · [下载最新版](https://github.com/codezjj777/UCampus/releases/latest) · [详细使用说明](u-study/README.md) · [更新日志](u-study/CHANGELOG.md) · [发布与公开仓库](docs/RELEASING.md)
 
 ## 下载后直接使用
 
-1. 打开右侧 **Releases**，下载 **`U-Study-1.4.20-windows-x64.zip`**。
+1. 打开右侧 **Releases**，下载 **`U-Study-1.4.30-windows-x64.zip`**。
 2. 右键 ZIP → **全部解压缩**，将整个文件夹解压到自己的目录。不要在压缩包内运行。
 3. 双击 **`一键启动.cmd`**。便携版包含 Node.js 和运行依赖，无需另外安装 Node.js 或执行 npm 命令。
 4. 程序打开本地工作台及 U校园专用登录窗口。正常登录后，回工作台点击 **同步课程**。
-5. 使用结束后双击 **`一键停止.cmd`**。只关闭工作台网页不会停止后台服务。
+5. 使用结束后点击工作台左下角 **安全退出**，等待保存记录、关闭学习窗口并退出后台。也可双击 **`一键停止.cmd`**。只关闭工作台网页不会停止后台服务。
 
 运行环境：**Windows 10 / 11 64 位（x64），已安装 Microsoft Edge 或 Google Chrome**。登录平台、同步课程和调用 AI 需要联网。发布包不含浏览器、个人账号、真实题库、API Key 或可选语音模型。
 

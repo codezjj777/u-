@@ -65,7 +65,8 @@ export async function correctionCoverageBrowserCases(t,context,root){
 
   await t.test('correction history uses values captured at the submit click instead of the earlier AI draft',async()=>{
     const f=await setup();try{
-      const action=f.engine.action.bind(f.engine);let changed=false;f.engine.action=async(frame,kind,...args)=>{if(kind==='submit'&&!changed){changed=true;await f.page.locator('#blank-0').fill('couch potato');}return action(frame,kind,...args);};
+      // Mutate at the actual click, after preflight checks, to verify submitted-value capture.
+      await f.page.evaluate(()=>{const changeAtSubmit=event=>{if(event.target.closest('#footer button')?.textContent!=='提交')return;document.querySelector('#blank-0').value='couch potato';document.removeEventListener('click',changeAtSubmit,true);};document.addEventListener('click',changeAtSubmit,true);});
       await f.engine.beginExerciseLearning(f.task,f.page,f.settings);const result=await f.engine.answerEntry(f.task,f.page,f.settings,new AbortController().signal);assert.equal(result.feedback.failed,false);assert.equal(f.requests[1].correction.history[0].answers[0],'couch potato');assert.equal(f.requests[1].correction.previousAnswers[0],'couch potato');assert.equal(f.requests[1].correction.history[0].grading.correct,1);assert.equal(f.store.data.bank.length,0);
     }finally{await f.engine.disposeExerciseLearning(f.task.id);await f.page.close();await f.store.flush();}
   });

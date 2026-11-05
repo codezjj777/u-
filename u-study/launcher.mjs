@@ -4,7 +4,7 @@ import { mkdir, open } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { openDashboard } from './server.mjs';
-import {assertRuntime,rotateLogs,APP_VERSION} from './runtime-check.mjs';
+import {assertRuntime,rotateLogs,APP_VERSION,sourceBuildId} from './runtime-check.mjs';
 import {openStudyWindow} from './workspace-start.mjs';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
@@ -16,7 +16,7 @@ async function serviceInfo(){
   try{
     const response=await fetch(`${url}/api/health`,{signal:AbortSignal.timeout(1200),redirect:'error'});
     const health=await response.json().catch(()=>null);
-    return response.ok&&health?.app==='u-study'&&health.ok===true?{status:'running',version:health.version||'未知版本'}:{status:'occupied'};
+    return response.ok&&health?.app==='u-study'&&health.ok===true?{status:'running',version:health.version||'未知版本',buildId:health.buildId}:{status:'occupied'};
   }catch(error){return {status:error.cause?.code==='ECONNREFUSED'?'stopped':'unresponsive'};}
 }
 async function serviceStatus(){return (await serviceInfo()).status;}
@@ -54,22 +54,23 @@ export async function main(args=process.argv.slice(2),{startService=startBackgro
   if(args.includes('--stop')){
     if(status==='stopped'){console.log('U Study 已停止。');return;}
     if(status!=='running')throw new Error('服务暂时没有响应，无法确认安全关闭。请查看 .runtime 中的日志。');
-    const response=await fetch(`${url}/api/shutdown`,{method:'POST',headers:{'Content-Type':'application/json','X-UStudy':'1',Origin:url},body:'{}',signal:AbortSignal.timeout(5000),redirect:'error'});
+    const response=await fetch(`${url}/api/shutdown`,{method:'POST',headers:{'Content-Type':'application/json','X-UStudy':'1',Origin:url},body:'{}',signal:AbortSignal.timeout(25000),redirect:'error'});
     if(!response.ok)throw new Error((await response.json()).error||'服务未能关闭。');
     await waitForStatus('stopped');console.log('U Study 已停止，课程与登录数据已保留。');return;
   }
-  if(status==='running'&&service.version!==APP_VERSION){
+  const buildId=await sourceBuildId(root),matchesBuild=info=>info.version===APP_VERSION&&info.buildId===buildId;
+  if(status==='running'&&!matchesBuild(service)){
     const response=await fetch(`${url}/api/state`,{signal:AbortSignal.timeout(4000),redirect:'error'});
     const state=response.ok?await response.json():null;
-    if(!state||state.windowOpen||state.syncing||state.operation||(state.tasks||[]).some(task=>['waiting','running','paused','review','stopping'].includes(task.status)))throw Object.assign(new Error(`当前后台 v${service.version} 尚未加载本机 v${APP_VERSION} 更新。请先保存草稿、使用「一键停止.cmd」退出，再重新启动；本次未复用旧后台。`),{code:'OUTDATED_SERVICE'});
-    console.log(`检测到旧后台 v${service.version}，当前没有任务或登录窗口，正在加载 v${APP_VERSION}…`);
-    const stopped=await fetch(`${url}/api/shutdown`,{method:'POST',headers:{'Content-Type':'application/json','X-UStudy':'1',Origin:url},body:'{}',signal:AbortSignal.timeout(5000),redirect:'error'});
+    if(!state||state.windowOpen||state.syncing||state.operation||(state.tasks||[]).some(task=>['waiting','running','paused','review','stopping'].includes(task.status)))throw Object.assign(new Error(`当前后台尚未加载本机代码更新（后台 v${service.version} / 本机 v${APP_VERSION}）。请先保存草稿，点击「安全退出」或双击「一键停止.cmd」，再重新启动；本次未复用旧后台。`),{code:'OUTDATED_SERVICE'});
+    console.log('检测到后台尚未加载本机代码更新，当前没有任务或登录窗口，正在重新加载…');
+    const stopped=await fetch(`${url}/api/shutdown`,{method:'POST',headers:{'Content-Type':'application/json','X-UStudy':'1',Origin:url},body:'{}',signal:AbortSignal.timeout(25000),redirect:'error'});
     if(!stopped.ok)throw new Error('旧后台未能正常关闭，请使用停止入口后重新启动。');
     await waitForStatus('stopped');status='stopped';
   }
   if(status==='stopped')await startService();
   if(status!=='running')await waitForStatus('running');
-  const ready=await serviceInfo();if(ready.version!==APP_VERSION)throw new Error('后台版本与本机代码仍不一致，请检查服务日志后重新启动。');
+  const ready=await serviceInfo();if(!matchesBuild(ready))throw new Error('后台尚未加载本机最新代码，请检查服务日志后重新启动。');
   console.log(`U Study v${ready.version} 已就绪：${url}\n服务在后台运行，关闭此窗口不会中断工作台。\n需要退出时，双击「停止 U Study.cmd」。`);
   if(!args.includes('--no-open'))await openDashboard(url);
   if(args.includes('--all')){

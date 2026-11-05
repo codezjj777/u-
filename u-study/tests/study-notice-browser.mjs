@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {Automation} from '../automation.mjs';
 import {AIRequestError} from '../answer-provider.mjs';
 import {readLearningStateFromDOM,findActionInDOM,readStudyNoticesFromDOM} from '../platform-dom.mjs';
-import {finishStudyNoticeCloseFromDOM,acknowledgeStudyNoticeFromDOM} from '../lesson-actions.mjs';
+import {finishStudyNoticeCloseFromDOM,acknowledgeStudyNoticeFromDOM,performControlAction} from '../lesson-actions.mjs';
 import * as Core from '../shared/core.mjs';
 import {lessonBlockerHTML,blockerAnswers} from './fixtures/lesson-blocker.mjs';
 
@@ -12,6 +12,65 @@ export async function studyNoticeBrowserCases(t,context){
     const task={id:'study-notice',status:'running',logs:[],answered:0,pages:0},store={data:{tasks:[task],bank:[]},changed(){},addLog(task,message){task.logs.push({message});}},engine=new Automation(store);engine.pages.attach(context);engine.pages.track(page,'lesson');
     return {page,engine,task,settings:{aiEnabled:true,autoSubmit:true}};
   }
+  await t.test('a notice arriving just after lesson entry is closed before the first question read or AI request',async()=>{
+    const f=await setup({late:true});let calls=0;try{
+      await f.page.evaluate(()=>setTimeout(()=>window.showBlocker(),150));
+      const read=f.engine.readQuestions.bind(f.engine);f.engine.readQuestions=async(...args)=>{assert.equal(await f.page.evaluate(()=>window.acks),1,'entry notice precedes question reading');return read(...args);};
+      f.engine.askModel=async question=>{calls++;assert.equal(await f.page.evaluate(()=>window.acks),1);return Core.parseModelAnswer(JSON.stringify({answers:blockerAnswers}),question);};
+      const result=await f.engine.answerEntryAttempt(f.task,f.page,f.settings,new AbortController().signal);assert.equal(result.feedback?.summary,true,JSON.stringify(f.task.logs));assert.equal(calls,1);assert.equal(await f.page.evaluate(()=>window.acks),1);assert.equal(await f.page.evaluate(()=>window.dangerCalls),0);
+    }finally{await f.page.close();}
+  });
+  await t.test('a late study notice closes while the original AI request is still pending without requesting another answer',async()=>{
+    const f=await setup({late:true});let calls=0;try{
+      f.engine.askModel=async(question,_settings,_key,signal,options)=>{calls++;await options.beforeAttempt();await f.page.evaluate(()=>setTimeout(()=>window.showBlocker(),100));await f.page.waitForFunction(()=>window.acks===1,undefined,{timeout:6000});signal.throwIfAborted();assert.equal(await f.page.evaluate(()=>window.inputEvents),0);return Core.parseModelAnswer(JSON.stringify({answers:blockerAnswers}),question);};
+      const result=await f.engine.answerEntryAttempt(f.task,f.page,f.settings,new AbortController().signal);assert.equal(result.feedback?.summary,true,JSON.stringify(f.task.logs));assert.equal(calls,1);assert.equal(await f.page.evaluate(()=>window.acks),1);assert.deepEqual(await f.page.evaluate(()=>window.submissions),[blockerAnswers]);assert.equal(await f.page.evaluate(()=>window.dangerCalls),0);
+    }finally{await f.page.close();}
+  });
+  await t.test('leaving the lesson during a pending AI request cancels it before editing or acknowledging the new page',async()=>{
+    const f=await setup({late:true});let calls=0,aborted=false;try{
+      f.engine.askModel=async(_question,_settings,_key,signal,options)=>{calls++;await options.beforeAttempt();await f.page.evaluate(()=>setTimeout(()=>{history.replaceState(null,'','/offline-recognition/another-lesson');window.showBlocker();},100));return new Promise((_,reject)=>signal.addEventListener('abort',()=>{aborted=true;reject(signal.reason);},{once:true}));};
+      await assert.rejects(f.engine.answerEntryAttempt(f.task,f.page,f.settings,new AbortController().signal),/目录项目已切换/);assert.equal(calls,1);assert.equal(aborted,true);assert.equal(await f.page.evaluate(()=>window.acks),0);assert.equal(await f.page.evaluate(()=>window.inputEvents),0);assert.equal(await f.page.evaluate(()=>window.submissions.length),0);
+    }finally{await f.page.close();}
+  });
+  await t.test('entry preflight handles a notice missed by the first loading poll before any questions are read',async()=>{
+    const f=await setup();let calls=0;
+    try{
+      const state=f.engine.readLearningState.bind(f.engine),read=f.engine.readQuestions.bind(f.engine);let first=true;
+      f.engine.readLearningState=async(...args)=>{const result=await state(...args);if(first){first=false;return {...result,studyNotice:false};}return result;};
+      f.engine.readQuestions=async(...args)=>{assert.equal((await state(f.page)).studyNotice,false);return read(...args);};
+      f.engine.askModel=async question=>{calls++;assert.equal(await f.page.evaluate(()=>window.acks),1);return Core.parseModelAnswer(JSON.stringify({answers:blockerAnswers}),question);};
+      const result=await f.engine.answerEntryAttempt(f.task,f.page,f.settings,new AbortController().signal);assert.equal(result.feedback?.summary,true,JSON.stringify(result));assert.equal(calls,1);assert.equal(await f.page.evaluate(()=>window.acks),1);
+    }finally{await f.page.close();}
+  });
+  await t.test('entry preflight also dismisses a study notice before using an already-read question snapshot',async()=>{
+    const f=await setup();let calls=0;
+    try{
+      const initialSnapshot=await f.engine.readQuestions(f.page,f.settings);
+      assert.ok(initialSnapshot?.questions?.length);
+      f.engine.askModel=async question=>{calls++;assert.equal(await f.page.evaluate(()=>window.acks),1);return Core.parseModelAnswer(JSON.stringify({answers:blockerAnswers}),question);};
+      const result=await f.engine.answerEntryAttempt(f.task,f.page,f.settings,new AbortController().signal,{initialSnapshot});assert.equal(result.feedback?.summary,true,JSON.stringify(result));assert.equal(calls,1);assert.equal(await f.page.evaluate(()=>window.acks),1);
+    }finally{await f.page.close();}
+  });
+  await t.test('one guarded operation closes repeated study notices from the front before performing its answer edit once',async()=>{
+    const f=await setup();try{
+      await f.page.evaluate(()=>{document.querySelector('input').setAttribute('data-notice-test-answer','true');const original=document.querySelector('.ant-modal-wrap');for(let index=1;index<3;index++){const clone=original.cloneNode(true);clone.style.zIndex=String(1000+index);clone.querySelector('#ack').onclick=()=>{window.acks++;clone.remove();};document.body.append(clone);}});
+      await performControlAction({checkpoint:async signal=>signal?.throwIfAborted()},f.page.mainFrame(),'answer','[data-notice-test-answer]',locator=>locator.fill('retained answer'),{signal:new AbortController().signal});
+      assert.equal(await f.page.evaluate(()=>window.acks),3);assert.equal(await f.page.locator('[data-notice-test-answer]').inputValue(),'retained answer');assert.equal(await f.page.evaluate(()=>window.inputEvents),1);assert.equal(await f.page.evaluate(()=>window.dangerCalls),0);
+    }finally{await f.page.close();}
+  });
+  await t.test('a confirmed study notice can finish a delayed leave-start phase before its answer control is used',async()=>{
+    const f=await setup();try{
+      await f.page.evaluate(()=>{document.querySelector('input').setAttribute('data-notice-test-answer','true');const style=document.createElement('style');style.textContent='@keyframes delayedNoticeExit{from{opacity:1}to{opacity:0}}.ant-zoom-leave-active{animation:delayedNoticeExit 30s linear paused}';document.head.append(style);const modal=document.querySelector('.ant-modal'),wrap=document.querySelector('.ant-modal-wrap');modal.querySelector('#ack').onclick=()=>{window.acks++;modal.classList.add('ant-zoom-leave','ant-zoom-leave-start','ant-zoom');setTimeout(()=>{modal.classList.remove('ant-zoom-leave-start');modal.classList.add('ant-zoom-leave-active');modal.addEventListener('animationend',event=>{window.nativeNoticeEnd=event.isTrusted;wrap.remove();},{once:true});modal.getAnimations();},2300);};});
+      await performControlAction({checkpoint:async signal=>signal?.throwIfAborted()},f.page.mainFrame(),'answer','[data-notice-test-answer]',locator=>locator.fill('retained answer'),{signal:new AbortController().signal});
+      assert.equal(await f.page.evaluate(()=>window.acks),1);assert.equal(await f.page.evaluate(()=>window.nativeNoticeEnd),true);assert.equal(await f.page.locator('[data-notice-test-answer]').inputValue(),'retained answer');assert.equal(await f.page.evaluate(()=>window.inputEvents),1);
+    }finally{await f.page.close();}
+  });
+  await t.test('an unrelated leave-start dialog is retained and never acknowledged as a study notice',async()=>{
+    const f=await setup();try{
+      await f.page.evaluate(()=>{document.querySelector('input').setAttribute('data-notice-test-answer','true');const modal=document.querySelector('.ant-modal');modal.className='ant-modal ant-zoom-leave ant-zoom-leave-start ant-zoom';modal.innerHTML='<p>确认清空所有答案？</p><button id="danger">确认</button>';modal.querySelector('button').onclick=()=>window.dangerCalls++;});
+      await assert.rejects(performControlAction({checkpoint:async signal=>signal?.throwIfAborted()},f.page.mainFrame(),'answer','[data-notice-test-answer]',locator=>locator.fill('unexpected'),{signal:new AbortController().signal}),error=>error.code==='LESSON_ACTION_BLOCKED');assert.equal(await f.page.evaluate(()=>window.dangerCalls),0);assert.equal(await f.page.evaluate(()=>window.inputEvents),0);assert.equal(await f.page.locator('.ant-modal').isVisible(),true);
+    }finally{await f.page.close();}
+  });
   await t.test('an initial roleless study notice is clicked once and fully dismissed before reading questions or requesting AI',async()=>{
     const f=await setup();let calls=0;
     try{
@@ -105,15 +164,15 @@ export async function studyNoticeBrowserCases(t,context){
       assert.equal(await f.page.evaluate(()=>window.acks),1);assert.equal(f.task.logs.some(log=>/已自动确认并关闭/.test(log.message)),false);assert.ok(f.engine.pages.records.get(f.page).protected);
     }finally{await f.page.close();}
   });
-  await t.test('a study-notice pause after AI retains the generated answer and resumes without another model request',async()=>{
-    const f=await setup({late:true});let calls=0,reviews=0,blocked=false;
+  for(const interruptions of [1,2])await t.test(`${interruptions} study-notice close interruption(s) after AI preserve generated answers with review only after the retry fails`,async()=>{
+    const f=await setup({late:true});let calls=0,reviews=0,blocked=0;
     try{
       const dismiss=f.engine.dismissStudyNotice.bind(f.engine),gate=f.engine.gate.bind(f.engine);
-      f.engine.dismissStudyNotice=async(...args)=>{if(calls&&!blocked){blocked=true;throw Object.assign(new Error('fixture prompt still closing'),{code:'LESSON_ACTION_BLOCKED'});}return dismiss(...args);};
-      f.engine.gate=async(task,signal)=>{if(task.status==='review'){reviews++;assert.equal(calls,1);assert.equal(await f.page.evaluate(()=>window.inputEvents),0);task.status='running';}return gate(task,signal);};
+      f.engine.dismissStudyNotice=async(...args)=>{if(calls&&blocked<interruptions){blocked++;throw Object.assign(new Error('fixture prompt still closing'),{code:'LESSON_ACTION_BLOCKED'});}return dismiss(...args);};
+      f.engine.gate=async(task,signal)=>{if(task.status==='review'){reviews++;assert.equal(blocked,2);assert.equal(calls,1);assert.equal(await f.page.evaluate(()=>window.inputEvents),0);task.status='running';}return gate(task,signal);};
       f.engine.askModel=async q=>{calls++;return Core.parseModelAnswer(JSON.stringify({answers:blockerAnswers}),q);};
       await f.engine.answerEntryAttempt(f.task,f.page,{...f.settings,autoSubmit:false},new AbortController().signal);
-      assert.equal(reviews,1);assert.equal(calls,1);assert.deepEqual(await f.page.locator('#exercise input').evaluateAll(items=>items.map(el=>el.value)),blockerAnswers);assert.equal(await f.page.evaluate(()=>window.submissions.length),0);
+      assert.equal(reviews,interruptions===1?0:1);assert.equal(blocked,interruptions);assert.equal(calls,1);assert.deepEqual(await f.page.locator('#exercise input').evaluateAll(items=>items.map(el=>el.value)),blockerAnswers);assert.equal(await f.page.evaluate(()=>window.submissions.length),0);
     }finally{await f.page.close();}
   });
   await t.test('current-lesson diagnostics read only the owned task page and never acknowledge, navigate or expose lesson text',async()=>{

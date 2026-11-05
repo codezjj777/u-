@@ -12,8 +12,8 @@ const script=await readFile(new URL('../dist/app.js',import.meta.url),'utf8');
 const idle=()=>new Promise(resolve=>setImmediate(resolve));
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
 
-function fixture(t,{courses=[],unitSummary={required:33,completed:2,pending:31,unknown:0},unitAvailability=[],keyPresent=true,saveError=false,manualEntryCount=0,syncError=false}={}){
-  const {window,document}=parseHTML(markup),calls=[],timers=[];let ready=false,client,unitReadCount=0;
+function fixture(t,{courses=[],unitSummary={required:33,completed:2,pending:31,unknown:0},unitAvailability=[],keyPresent=true,saveError=false,manualEntryCount=0,syncError=false,shutdownError=false}={}){
+  const {window,document}=parseHTML(markup),calls=[],timers=[];let ready=false,client,unitReadCount=0,backendGone=false;
   // linkedom exposes a getter only; emulate native select selection for UI tests.
   Object.defineProperty(window.HTMLSelectElement.prototype,'value',{configurable:true,get(){const options=[...this.querySelectorAll('option')];return (options.find(option=>option.hasAttribute('selected'))||options[0])?.value||'';},set(value){for(const option of this.querySelectorAll('option')){if(option.value===value)option.setAttribute('selected','');else option.removeAttribute('selected');}}});
   const settings={aiEnabled:true,endpoint:'https://ai.example.test/v1/chat/completions',model:'fixture-model',autoSubmit:false,questionSelector:'',nextSelector:'',submitSelector:''};
@@ -25,8 +25,9 @@ function fixture(t,{courses=[],unitSummary={required:33,completed:2,pending:31,u
   }
   const transport={createClient:options=>{
     client=UStudyService.createClient({...options,EventSourceImpl:undefined,location:new URL('http://127.0.0.1:4173/'),schedule:()=>1,cancel:()=>{},fetchImpl:async(url,options)=>{
-      calls.push({url,options});if(!ready)throw new TypeError('fixture offline');
+      calls.push({url,options});if(!ready||backendGone)throw new TypeError('fixture offline');
       if(url==='/api/state')return json(backend);
+      if(url==='/api/shutdown'){if(shutdownError)return json({error:'数据未能保存到磁盘。'},507);backendGone=true;return json({accepted:true,saved:true},202);}
       if(url==='/api/ai/test')return json({ok:true,model:'fixture-model',latencyMs:12});
       if(url==='/api/sync')return syncError?json({error:'离线同步失败'},503):json({accepted:true},202);
       if(url==='/api/settings'){if(saveError)return json({error:'数据未能保存到磁盘，请重试。'},507);backend.settings={...backend.settings,...JSON.parse(options.body).settings};return json({...backend,keyPresent:true});}
@@ -44,8 +45,20 @@ function fixture(t,{courses=[],unitSummary={required:33,completed:2,pending:31,u
     document.querySelector('#ai-enabled').checked=true;
     document.querySelector('#api-endpoint').value=settings.endpoint;document.querySelector('#api-model').value=settings.model;
   }
-  return {document,window,calls,fill,click,reconnect:()=>client.ensureConnected(),recover:()=>{ready=true;},setState:async next=>{Object.assign(backend,next);await client.request('/state');}};
+  return {document,window,calls,fill,click,reconnect:()=>client.ensureConnected(),recover:()=>{ready=true;},allowShutdown:()=>{shutdownError=false;},setState:async next=>{Object.assign(backend,next);await client.request('/state');}};
 }
+
+test('the safe-exit button blocks repeated actions, confirms exit and never reconnects on focus',async t=>{
+  const f=fixture(t);await idle();f.recover();await f.reconnect();const button=f.document.querySelector('#safe-exit');assert.match(button.textContent,/安全退出/);
+  f.click(button);f.click(button);assert.equal(button.disabled,true);assert.equal(f.document.querySelector('#shutdown-overlay').hidden,false);assert.equal(f.document.querySelector('.app-shell').inert,true);
+  const deadline=Date.now()+2000;while(f.document.querySelector('#shutdown-overlay').dataset.state!=='done'&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.match(f.document.querySelector('#shutdown-title').textContent,/已安全退出/);assert.match(f.document.querySelector('#shutdown-message').textContent,/记录已保存/);assert.equal(f.calls.filter(call=>call.url==='/api/shutdown').length,1);
+  const before=f.calls.length;f.window.dispatchEvent(new f.window.Event('focus'));f.window.dispatchEvent(new f.window.Event('online'));await idle();assert.equal(f.calls.length,before);assert.equal(f.document.querySelector('#connection-state').textContent,'程序已退出');
+});
+test('a failed safe exit displays the save error and only retries when its retry button is clicked',async t=>{
+  const f=fixture(t,{shutdownError:true});await idle();f.recover();await f.reconnect();f.click(f.document.querySelector('#safe-exit'));await idle();await idle();assert.equal(f.document.querySelector('#shutdown-overlay').dataset.state,'error');assert.match(f.document.querySelector('#shutdown-message').textContent,/数据未能保存/);assert.equal(f.document.querySelector('#shutdown-retry').hidden,false);
+  f.allowShutdown();f.click(f.document.querySelector('#shutdown-retry'));const deadline=Date.now()+2000;while(f.document.querySelector('#shutdown-overlay').dataset.state!=='done'&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));assert.equal(f.document.querySelector('#shutdown-overlay').dataset.state,'done');assert.equal(f.calls.filter(call=>call.url==='/api/shutdown').length,2);
+});
 
 test('the AI test reconnects after failed startup and uses no browser-supplied key',async t=>{
   const f=fixture(t);await idle();f.fill();assert.equal(f.document.querySelector('#settings-service-note').hidden,false);

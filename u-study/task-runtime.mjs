@@ -24,7 +24,9 @@ export class TaskRuntime {
     this.controllers.set(task.id,controller);
     const pending=Promise.resolve().then(work).catch(error=>{
       if(['stopping','stopped'].includes(task.status)){task.status='stopped';return;}
-      task.status='failed';this.store.addLog(task,error.message||'任务中断，请检查登录窗口。','error');this.store.notice(`答题任务需要处理：${error.message}`);
+      const aborted=error?.name==='AbortError'||error?.code==='ABORT_ERR',reason=controller.signal.aborted?controller.signal.reason:error?.cause||error;
+      const message=aborted?(reason?.message&&!/^(?:the |this )?operation (?:was )?aborted[.!]?$/i.test(reason.message)?reason.message:'任务操作已取消，请检查登录窗口后重新启动任务。'):error?.message||'任务中断，请检查登录窗口。';
+      task.status='failed';this.store.addLog(task,message,'error');this.store.notice(`答题任务需要处理：${message}`);
     }).finally(async()=>{
       if(task.status==='stopping')task.status='stopped';
       try{await onFinally();}finally{this.controllers.delete(task.id);this.runs.delete(task.id);this.store.changed();}
