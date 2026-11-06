@@ -718,6 +718,7 @@ export class Automation {
         const answers=[];
         if(solve){
           if(!settings.aiEnabled||!this.store.apiKey)throw new Error('媒体已读取，生成答案预览还需启用并配置 AI。');
+          if(this.store.keyEndpoint!==undefined&&this.store.keyEndpoint!==settings.endpoint)throw new Error('请在答题设置中保存当前接口对应的 API Key。');
           if(snapshot.questions.length>15)throw new Error('单次答案预览最多 15 道题，请缩小检测范围。');
           const verifySnapshot=async()=>{
             await this.gate(task,signal);const fresh=await this.readQuestions(page,settings);this.assertEntryPage(page,snapshot.pageURL,snapshot);

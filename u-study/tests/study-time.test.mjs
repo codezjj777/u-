@@ -7,6 +7,7 @@ import { StudyTimeStore } from '../study-time-store.mjs';
 import { parseStudyDuration, studyCredit, isStudyIdleNotice, isStudyTimeURL, studyEntryMatches } from '../study-time-dom.mjs';
 import { Store } from '../store.mjs';
 import { createApp } from '../server.mjs';
+import {accessToken,accessHeaders} from './fixtures/local-access.mjs';
 import { sharedStudyTimeBrowserAccess } from '../study-time-browser.mjs';
 import { normalizeStudyTimeGrades } from '../study-time-grades.mjs';
 
@@ -331,14 +332,14 @@ test('the new API retains origin checks and leaves original answer state and end
   let answerStarts = 0, answerControls = 0;
   const automation = { busy: () => true, startTask: (courseId, unitId) => { answerStarts++; return { id: 'answer-task', courseId, unitId, status: 'running' }; }, controlTask: () => { answerControls++; return { id: 'answer-task', status: 'paused' }; } };
   const learning = new StudyTimeController({ directory: path.join(directory, 'study-time'), courses: () => store.data.courses, browser: new FakeBrowser(), pollMs: 1e8 });
-  const server = createApp({ store, automation, studyTime: learning, port: 0 }); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const server = createApp({ store, automation, studyTime: learning, port:0,accessToken}); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const post = (route, data, headers = {}) => fetch(base + '/api' + route, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-UStudy': '1', Origin: base, ...headers }, body: JSON.stringify(data) });
+  const post = (route, data, headers = {}) => fetch(base + '/api' + route, { method: 'POST', headers:{...accessHeaders,'Content-Type': 'application/json', 'X-UStudy': '1', Origin: base, ...headers }, body: JSON.stringify(data) });
   t.after(async () => { await server.shutdown(); await store.flush(); assert.ok(path.resolve(directory).startsWith(cache + path.sep)); await rm(directory, { recursive: true, force: true }); });
   const before = JSON.stringify(store.data);
   assert.equal((await fetch(base + '/api/study-time/state', { headers: { 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
   assert.equal((await fetch(base + '/api/study-time/diagnostics', { headers: { 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
-  assert.deepEqual(await (await fetch(base + '/api/study-time/diagnostics')).json(), { windowOpen: false, pages: [] });
+  assert.deepEqual(await (await fetch(base + '/api/study-time/diagnostics', { headers: accessHeaders })).json(), { windowOpen: false, pages: [] });
   assert.equal((await post('/study-time/window', {}, { Origin: 'https://evil.test' })).status, 403);
   assert.equal((await post('/study-time/window', {}, { 'X-UStudy': '0' })).status, 403);
   assert.equal((await post('/study-time/catalog', { courseId: course.id })).status, 200);

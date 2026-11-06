@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
-import {mkdtemp,mkdir,readFile,writeFile,rm,readdir,stat} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,writeFile,rm,readdir,stat,unlink} from 'node:fs/promises';
 import path from 'node:path';
 import {setTimeout as sleep} from 'node:timers/promises';
 import * as Core from '../shared/core.mjs';
 import {Store} from '../store.mjs';
 import {createApp} from '../server.mjs';
+import {accessToken,accessHeaders} from './fixtures/local-access.mjs';
 import {Automation} from '../automation.mjs';
 import {fillQuestion} from '../answer-writer.mjs';
 import {OperationManager} from '../operation-manager.mjs';
@@ -86,26 +87,32 @@ test('failed explicit saves reject, retain the old settings, and recover on retr
 });
 test('settings API reports storage failure instead of accepting unsaved data',async t=>{
   const {store,directory}=await fixture(t);await mkdir(path.join(directory,'state.tmp'));
-  const server=createApp({store,automation:{busy:()=>false},port:0});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>server.shutdown());
+  const server=createApp({store,automation:{busy:()=>false},port:0,accessToken});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>server.shutdown());
   const base=`http://127.0.0.1:${server.address().port}`;
-  const response=await fetch(base+'/api/settings',{method:'POST',headers:{'Content-Type':'application/json','X-UStudy':'1',Origin:base},body:JSON.stringify({settings:{autoSubmit:true}})});
+  const response=await fetch(base+'/api/settings',{method:'POST',headers:{...accessHeaders,'Content-Type':'application/json','X-UStudy':'1',Origin:base},body:JSON.stringify({settings:{autoSubmit:true}})});
   assert.equal(response.status,507);assert.equal(store.data.settings.autoSubmit,false);assert.match((await response.json()).error,/未能保存/);
 });
-test('concurrent settings requests cannot interleave keys and provider settings',async t=>{
+test('concurrent settings requests cannot interleave keys and provider settings',{skip:process.platform!=='win32'},async t=>{
   const {store,directory}=await fixture(t),entered=deferred(),release=deferred(),persist=store.persist.bind(store);
   t.mock.method(store,'persist',async(...args)=>{entered.resolve();await release.promise;return persist(...args);});
-  const server=createApp({store,automation:{busy:()=>false},port:0});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>server.shutdown());
+  const server=createApp({store,automation:{busy:()=>false},port:0,accessToken});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>server.shutdown());
   const base=`http://127.0.0.1:${server.address().port}`;
-  const post=data=>fetch(base+'/api/settings',{method:'POST',headers:{'Content-Type':'application/json','X-UStudy':'1',Origin:base},body:JSON.stringify(data)});
+  const post=data=>fetch(base+'/api/settings',{method:'POST',headers:{...accessHeaders,'Content-Type':'application/json','X-UStudy':'1',Origin:base},body:JSON.stringify(data)});
   const first=post({settings:{aiEnabled:true,endpoint:'https://first.example.test/v1',model:'one'},apiKey:'first-fixture-key'});await entered.promise;
   assert.equal((await post({settings:{aiEnabled:true,endpoint:'https://second.example.test/v1',model:'two'},apiKey:'second-fixture-key'})).status,409);
   release.resolve();assert.equal((await first).status,200);const next=await new Store(directory,{env:{}}).load();assert.equal(next.apiKey,'first-fixture-key');assert.equal(next.keyEndpoint,next.data.settings.endpoint);
 });
-test('a crash after staging credentials still reloads the last committed settings/key pair',async t=>{
+test('a failed commit after staging encrypted credentials still reloads the previous settings/key pair',{skip:process.platform!=='win32'},async t=>{
   const {store,directory}=await fixture(t),endpoint='https://old.example.test/v1';
   await store.saveConfiguration({settings:{aiEnabled:true,endpoint,model:'old'},apiKey:'old-fixture-key'});
-  const committed=JSON.parse(await readFile(path.join(directory,'credentials.json'),'utf8'));
-  await writeFile(path.join(directory,'credentials.json'),JSON.stringify({apiKey:'new-fixture-key',endpoint:'https://new.example.test/v1',version:'uncommitted',previous:[committed]}));
+  const writeCredentials=store.writeCredentials.bind(store);
+  t.mock.method(store,'writeCredentials',async credentials=>{
+    await writeCredentials(credentials);
+    await unlink(path.join(directory,'state.tmp'));
+  });
+  await assert.rejects(store.saveLocalKey('new-fixture-key','https://new.example.test/v1'),{status:507});
+  const sealed=await readFile(path.join(directory,'credentials.json'),'utf8');
+  assert.equal(sealed.includes('fixture-key'),false);
   const next=await new Store(directory,{env:{}}).load();assert.equal(next.apiKey,'old-fixture-key');assert.equal(next.data.settings.endpoint,endpoint);
   assert.equal(JSON.stringify(next.publicState()).includes('fixture-key'),false);
 });

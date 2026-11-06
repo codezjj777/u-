@@ -1,6 +1,6 @@
 {
   "name": "u-study-workspace",
-  "version": "1.4.30",
+  "version": "1.4.31",
   "private": true,
   "type": "module",
   "description": "U校园课程查看与题库自动填答控制台",
@@ -96,6 +96,8 @@
     "release.mjs",
     "release-windows.mjs",
     "release-files.mjs",
+    "local-access.mjs",
+    "local-secrets.mjs",
     "shared/core.mjs",
     "shared/contracts.mjs",
     "dist/index.html",

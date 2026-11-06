@@ -4,8 +4,8 @@ import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {releaseFiles} from './release-files.mjs';
 
-export const APP_VERSION='1.4.30';
-export const APP_INFO=Object.freeze({version:APP_VERSION,modifiedAt:'2026-11-05'});
+export const APP_VERSION='1.4.31';
+export const APP_INFO=Object.freeze({version:APP_VERSION,modifiedAt:'2026-11-06'});
 const sourceFiles=releaseFiles.filter(file=>/\.(?:mjs|js|py|html|css|cmd)$/.test(file)||['package.json','package-lock.json','speech-requirements.txt'].includes(file));
 export async function sourceBuildId(directory=path.dirname(fileURLToPath(import.meta.url))){
   const sources=await Promise.all(sourceFiles.map(file=>readFile(path.join(directory,file))));

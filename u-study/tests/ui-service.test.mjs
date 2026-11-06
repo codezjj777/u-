@@ -6,6 +6,7 @@ import {parseHTML} from 'linkedom';
 import '../dist/core.js';
 import '../dist/service.js';
 import '../dist/task-view.js';
+import {accessToken} from './fixtures/local-access.mjs';
 
 const markup=await readFile(new URL('../dist/index.html',import.meta.url),'utf8');
 const script=await readFile(new URL('../dist/app.js',import.meta.url),'utf8');
@@ -24,7 +25,7 @@ function fixture(t,{courses=[],unitSummary={required:33,completed:2,pending:31,u
     dialog.close=function(){this.open=false;this.removeAttribute('open');this.dispatchEvent(new window.Event('close'));};
   }
   const transport={createClient:options=>{
-    client=UStudyService.createClient({...options,EventSourceImpl:undefined,location:new URL('http://127.0.0.1:4173/'),schedule:()=>1,cancel:()=>{},fetchImpl:async(url,options)=>{
+    client=UStudyService.createClient({...options,openEvents:null,accessToken,location:new URL('http://127.0.0.1:4173/'),schedule:()=>1,cancel:()=>{},fetchImpl:async(url,options)=>{
       calls.push({url,options});if(!ready||backendGone)throw new TypeError('fixture offline');
       if(url==='/api/state')return json(backend);
       if(url==='/api/shutdown'){if(shutdownError)return json({error:'数据未能保存到磁盘。'},507);backendGone=true;return json({accepted:true,saved:true},202);}

@@ -15,6 +15,7 @@ import {assertRuntime,APP_VERSION,APP_INFO,sourceBuildId} from './runtime-check.
 import {StudyTimeController} from './study-time.mjs';
 import {handleStudyTimeRequest} from './study-time-http.mjs';
 import {sharedStudyTimeBrowserAccess} from './study-time-browser.mjs';
+import {LOCAL_AUTH,createAccessToken,dashboardURL,hasLocalAccess,publishLocalAccess} from './local-access.mjs';
 export {validateSettings} from './settings.mjs';
 
 const ROOT=path.dirname(fileURLToPath(import.meta.url));
@@ -39,7 +40,7 @@ function resolveAPIKey(value,endpoint,store){
   }
   return provided||(endpoint===store.keyEndpoint?store.apiKey:'');
 }
-export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,'dist'),beforeShutdown,onShutdown,testConnection=testAIConnection,studyTime}){
+export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,'dist'),beforeShutdown,onShutdown,testConnection=testAIConnection,studyTime,accessToken=createAccessToken(),isReady=()=>true}){
   const hub=createStateHub(store);
   const learning=studyTime||new StudyTimeController({directory:path.join(store.directory||path.join(ROOT,'.runtime'),'study-time'),courses:()=>store.data.courses,browserAccess:sharedStudyTimeBrowserAccess(automation)});
   const operations=automation.operations||new OperationManager(operation=>{store.operation=operation;store.changed({persist:false});});
@@ -54,18 +55,23 @@ export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,
       const requestURL=new URL(req.url,`http://127.0.0.1:${actualPort}`),pathname=requestURL.pathname;
       if(req.method==='OPTIONS'){json(res,403,{error:'不允许跨域请求。'});return;}
       if(pathname.startsWith('/api/')){
-        if(req.headers['sec-fetch-site']==='cross-site'){json(res,403,{error:'不允许跨站访问本地服务。'});return;}
-        if(req.method!=='GET'){
-          const origins=new Set([`http://127.0.0.1:${actualPort}`,`http://localhost:${actualPort}`]);
-          if(req.headers['x-ustudy']!=='1'||!String(req.headers['content-type']||'').startsWith('application/json')||(req.headers.origin&&!origins.has(req.headers.origin))){json(res,403,{error:'请求来源验证失败。'});return;}
+        const {origin,'sec-fetch-site':fetchSite}=req.headers;
+        if((origin!==undefined&&origin!==`http://${req.headers.host}`)||(fetchSite!==undefined&&!['same-origin','none'].includes(fetchSite))){
+          json(res,403,{error:'请求来源验证失败。'});return;
         }
+        if(!isReady()){json(res,503,{app:'u-study',starting:true,error:'本地服务正在初始化。'});return;}
+        if(req.method==='GET'&&pathname==='/api/health'){json(res,200,{ok:true,app:'u-study',...APP_INFO,buildId:BUILD_ID,instanceId:store.instanceId,closing,localAuth:LOCAL_AUTH});return;}
+        if(!hasLocalAccess(req.headers.authorization,accessToken)){
+          res.setHeader('WWW-Authenticate','Bearer');
+          json(res,401,{error:'本地访问未授权，请双击「一键启动.cmd」重新打开工作台。'});return;
+        }
+        if(req.method==='POST'&&(req.headers['x-ustudy']!=='1'||req.headers['content-type']?.split(';',1)[0].trim().toLowerCase()!=='application/json')){json(res,403,{error:'请求来源验证失败。'});return;}
         if(closing&&!['/api/shutdown','/api/health','/api/state'].includes(pathname)){json(res,503,{error:'程序正在安全退出，请稍候。'});return;}
         if(pathname.startsWith('/api/study-time/')){await handleStudyTimeRequest(req,res,pathname,learning,json);return;}
-        if(req.method==='GET'&&pathname==='/api/health'){json(res,200,{ok:true,app:'u-study',...APP_INFO,buildId:BUILD_ID,instanceId:store.instanceId,closing});return;}
         if(req.method==='GET'&&pathname==='/api/state'){json(res,200,store.publicState());return;}
         if(req.method==='GET'&&pathname==='/api/bank/export'){json(res,200,store.data.bank);return;}
         if(req.method==='GET'&&pathname==='/api/events'){
-          res.writeHead(200,{...securityHeaders,'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive','X-Accel-Buffering':'no'});res.flushHeaders();hub.add(res);return;
+          res.writeHead(200,{...securityHeaders,'Content-Type':'text/event-stream','Cache-Control':'no-store','Connection':'keep-alive','X-Accel-Buffering':'no'});res.flushHeaders();hub.add(res);return;
         }
         if(req.method!=='POST'){json(res,405,{error:'不支持此请求方法。'});return;}
         const input=await body(req,pathname==='/api/settings'?128*1024*1024:MAX_BODY);
@@ -152,17 +158,21 @@ export function createApp({store,automation,port=4173,staticRoot=path.join(ROOT,
   server.shutdown=()=>closePromise||=(async()=>{try{await server.prepareShutdown();}finally{hub.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}})();
   return server;
 }
-export function openDashboard(url){
+export function openDashboard(url,accessToken){
   const candidates=[path.join(process.env['ProgramFiles(x86)']||'C:\\Program Files (x86)','Microsoft','Edge','Application','msedge.exe'),path.join(process.env.ProgramFiles||'C:\\Program Files','Google','Chrome','Application','chrome.exe')];
   const executable=candidates.find(existsSync);
-  if(!executable)throw new Error(`未找到 Edge 或 Chrome。请在浏览器中打开 ${url}`);
-  return new Promise((resolve,reject)=>{const child=spawn(executable,[`--app=${url}`],{detached:true,stdio:'ignore',windowsHide:false});child.once('error',reject);child.once('spawn',()=>{child.unref();resolve();});});
+  if(!executable)throw new Error('未找到 Edge 或 Chrome。请安装浏览器后再运行「一键启动.cmd」。');
+  return new Promise((resolve,reject)=>{
+    const child=spawn(executable,[`--app=${dashboardURL(url,accessToken)}`],{detached:true,stdio:'ignore',windowsHide:false});
+    child.once('error',()=>reject(new Error('无法打开工作台浏览器，请检查 Edge 或 Chrome 后重试。')));
+    child.once('spawn',()=>{child.unref();resolve();});
+  });
 }
 export async function main(){
   assertRuntime();
   const port=Number(process.env.PORT||4173);if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('PORT 必须是 1024 到 65535 之间的端口。');
-  const store=await new Store(path.join(ROOT,'.runtime')).load(),automation=new Automation(store);
-  let preparation,shutdownPromise,deadline;
+  const store=new Store(path.join(ROOT,'.runtime')),automation=new Automation(store),accessToken=createAccessToken();
+  let preparation,shutdownPromise,deadline,ready=false;
   const prepareShutdown=()=>preparation||=(async()=>{
     deadline=setTimeout(()=>process.exit(1),20000);deadline.unref();
     const results=await Promise.allSettled([automation.close(),server.prepareShutdown()]);
@@ -175,11 +185,17 @@ export async function main(){
     catch(error){console.error(error.message);code=1;try{await server.shutdown();}catch{}}
     finally{clearTimeout(deadline);process.exit(code);}
   })();
-  const server=createApp({store,automation,port,beforeShutdown:prepareShutdown,onShutdown:shutdown});
-  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
+  const server=createApp({store,automation,port,beforeShutdown:prepareShutdown,onShutdown:shutdown,accessToken,isReady:()=>ready});
+  // Own the port before migrating any data or replacing the launch credential.
+  try{
+    await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
+    await store.load();
+    await publishLocalAccess(store.directory,port,store.instanceId,accessToken);
+    ready=true;
+  }catch(error){await server.shutdown().catch(()=>{});throw error;}
   const url=`http://127.0.0.1:${port}`;console.log(`U Study v${APP_VERSION} 已启动：${url}\n代码标识：${BUILD_ID.slice(0,12)}\n无需浏览器扩展。双击「停止 U Study.cmd」可关闭后台服务。`);
   process.once('SIGINT',()=>{void shutdown();});process.once('SIGTERM',()=>{void shutdown();});
-  if(process.argv.includes('--open'))await openDashboard(url);
+  if(process.argv.includes('--open'))await openDashboard(url,accessToken);
   return {server,store,automation};
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(error=>{console.error(error.code==='EADDRINUSE'?'4173 端口已被占用。若 U Study 已启动，请直接打开 http://127.0.0.1:4173；否则设置 PORT 后重试。':error.message);process.exitCode=1;});
+if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(error=>{console.error(error.code==='EADDRINUSE'?'本地端口已被占用。若 U Study 已启动，请使用「一键启动.cmd」打开工作台；否则设置 PORT 后重试。':error.message);process.exitCode=1;});

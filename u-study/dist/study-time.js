@@ -222,7 +222,7 @@
   }
   async function request(route, data) {
     if (shutdownRequested) throw new DOMException('程序正在安全退出。', 'AbortError');
-    const response = await fetch(`/api/study-time${route}`, { method: data === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', 'X-UStudy': '1' }, ...(data === undefined ? {} : { body: JSON.stringify(data) }), signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(data === undefined ? 5000 : 65000)]) });
+    const response = await UStudyService.fetchLocal(`/study-time${route}`, { method: data === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', 'X-UStudy': '1' }, ...(data === undefined ? {} : { body: JSON.stringify(data) }), signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(data === undefined ? 5000 : 65000)]) });
     const result = await response.json();
     if (!response.ok) throw Object.assign(new Error(route === '/state' && [404, 405].includes(response.status) ? '当前后台尚未加载学习功能，请在答题任务结束后停止并重新启动程序。' : result.error || '学习时长操作未完成。'), { status: response.status });
     return result;

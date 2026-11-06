@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Automation} from '../automation.mjs';
 import {createApp} from '../server.mjs';
+import {accessToken,accessHeaders} from './fixtures/local-access.mjs';
 import {Store} from '../store.mjs';
 import {mkdtemp,rm} from 'node:fs/promises';
 import path from 'node:path';
@@ -77,8 +78,8 @@ test('media preview API validates its scope and keeps the normal local-origin pr
   const store=await new Store(directory,{env:{}}).load();let calls=0;
   try{
     const automation={busy:()=>false,previewMedia:async(input,options)=>{calls++;assert.equal(input.solve,true);assert.ok(options.signal instanceof AbortSignal);return {ready:true,written:false,submitted:false};}};
-    server=createApp({store,automation,port:0});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const base=`http://127.0.0.1:${server.address().port}`;
-    const send=(input,origin=base)=>fetch(base+'/api/media/preview',{method:'POST',headers:{Origin:origin,'X-UStudy':'1','Content-Type':'application/json'},body:JSON.stringify(input)});
+    server=createApp({store,automation,port:0,accessToken});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const base=`http://127.0.0.1:${server.address().port}`;
+    const send=(input,origin=base)=>fetch(base+'/api/media/preview',{method:'POST',headers:{...accessHeaders,Origin:origin,'X-UStudy':'1','Content-Type':'application/json'},body:JSON.stringify(input)});
     const input={courseId:'book',unitId:'unit',entryKey:'entry',solve:true};
     assert.equal((await send(input,'https://foreign.example.test')).status,403);assert.equal((await send({...input,entryKey:''})).status,400);assert.equal(calls,0);
     assert.deepEqual(await(await send(input)).json(),{ready:true,written:false,submitted:false});assert.equal(calls,1);

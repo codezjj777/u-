@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../dist/service.js';
+import {accessToken} from './fixtures/local-access.mjs';
 
 const state=()=>({courses:[],tasks:[],activity:[],settings:{aiEnabled:false},bankCount:0,connected:false,windowOpen:false,lastSynced:null,keyPresent:false});
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
@@ -28,13 +29,11 @@ test('a failed data save leaves the service connected and never reports a succes
 
 function fixture(t,fetchImpl,options={}){
   const streams=[],timers=new Map(),changes=[],states=[];let serial=0;
-  class Stream{
-    constructor(url){this.url=url;this.listeners=new Map();this.closed=false;streams.push(this);}
-    addEventListener(name,fn){this.listeners.set(name,fn);}
-    emit(name,value){this.listeners.get(name)?.({data:JSON.stringify(value)});}
-    close(){this.closed=true;}
-  }
-  const client=UStudyService.createClient({fetchImpl,EventSourceImpl:Stream,location:new URL('http://127.0.0.1:4173/'),onConnectionChange:value=>changes.push(value),onState:value=>states.push(value),schedule:fn=>{const id=++serial;timers.set(id,fn);return id;},cancel:id=>timers.delete(id),...options});
+  const openEvents=(_fetcher,onEvent,signal)=>new Promise(resolve=>{
+    const stream={closed:false,emit(name,value){if(name==='error')resolve();else onEvent(name,value);}};
+    streams.push(stream);signal.addEventListener('abort',()=>{stream.closed=true;resolve();},{once:true});
+  });
+  const client=UStudyService.createClient({fetchImpl,openEvents,accessToken,location:new URL('http://127.0.0.1:4173/'),onConnectionChange:value=>changes.push(value),onState:value=>states.push(value),schedule:fn=>{const id=++serial;timers.set(id,fn);return id;},cancel:id=>timers.delete(id),...options});
   t.after(()=>client.stop());
   return {client,streams,timers,changes,states,async retry(){const [id,fn]=timers.entries().next().value||[];assert.ok(fn,'a recovery read should be scheduled');timers.delete(id);await fn();}};
 }
@@ -50,6 +49,25 @@ test('service starts its event stream even when the first state request fails',a
 test('service automatically recovers after startup failure without a page refresh',async t=>{
   let ready=false;const f=fixture(t,async()=>{if(!ready)throw new TypeError('offline');return json(state());});
   await assert.rejects(f.client.start());ready=true;await f.retry();assert.equal(f.client.isConnected(),true);assert.equal(f.states.length,1);assert.equal(f.timers.size,0);
+});
+
+test('a missing or stale launcher token asks the user to reopen the workbench',async t=>{
+  for(const token of ['',accessToken]){
+    let calls=0;const statuses=[];
+    const f=fixture(t,async(_url,options)=>{
+      calls++;assert.equal(options.headers.Authorization,`Bearer ${accessToken}`);
+      assert.equal(options.redirect,'error');assert.equal(options.credentials,'omit');return json({},401);
+    },{accessToken:token,onConnectionChange:(online,accessRequired)=>statuses.push([online,accessRequired])});
+    await assert.rejects(f.client.start(),{code:'LOCAL_AUTH_REQUIRED'});
+    await assert.rejects(f.client.request('/settings',{}),{code:'LOCAL_AUTH_REQUIRED'});
+    assert.equal(calls,token?1:0);assert.deepEqual(statuses,[[false,true]]);assert.equal(f.timers.size,0);
+  }
+});
+
+test('the authenticated event stream reconnects after a dropped connection',async t=>{
+  const f=fixture(t,async()=>json(state()));await f.client.start();f.streams[0].emit('error');
+  await new Promise(resolve=>setImmediate(resolve));await f.retry();
+  assert.equal(f.streams.length,2);assert.equal(f.client.isConnected(),true);
 });
 
 test('a valid event stream state can restore the connection after a failed initial fetch',async t=>{

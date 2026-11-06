@@ -46,7 +46,7 @@ npm.cmd run release:windows
 从 Release 下载 ZIP，计算摘要并与同一 Release 的 `SHA256SUMS.txt` 对比：
 
 ```powershell
-Get-FileHash .\U-Study-1.4.30-windows-x64.zip -Algorithm SHA256
+Get-FileHash .\U-Study-1.4.31-windows-x64.zip -Algorithm SHA256
 ```
 
 解压到新目录，在没有个人 `.runtime/` 的状态下检查工作台启动、停止和错误日志入口。不要将测试登录后的目录重新打包上传。

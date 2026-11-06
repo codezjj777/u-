@@ -10,6 +10,7 @@ import {mkdtemp,rm,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {prepareOralDraft,saveLocalOralDraft} from '../oral-draft.mjs';
 import {createApp} from '../server.mjs';
+import {accessToken,accessHeaders} from './fixtures/local-access.mjs';
 
 test('oral audio validation rejects silence, truncation and excessive duration',()=>{
   const result=inspectOralWave(oralTestWave());assert.equal(result.duration,1);assert.equal(result.sampleRate,22050);assert.ok(result.rms>0.01);
@@ -110,7 +111,7 @@ test('a one-time oral replacement visits only its selected pending leaf and retr
 test('the task API rejects malformed or cross-origin replacement requests and keeps exact preview bindings',async()=>{
   const directory=await mkdtemp(path.resolve('.cache/oral-api-'));let server,store;
   try{
-    store=await new Store(directory,{env:{}}).load();let received,calls=0;server=createApp({store,automation:{busy:()=>false,startTask:(courseId,unitId,options)=>{calls++;received={courseId,unitId,options};return {id:'fixture',status:'waiting'};}},port:0});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const base=`http://127.0.0.1:${server.address().port}`,replacement={entryKey:JSON.stringify(['unit4',['Getting the idea'],'Exercise 2']),recordingKey:'a'.repeat(64),draftKey:'b'.repeat(64)},send=(oralReplacement,origin=base)=>fetch(base+'/api/tasks',{method:'POST',headers:{'Content-Type':'application/json','X-UStudy':'1',Origin:origin},body:JSON.stringify({courseId:'book',unitId:'unit4',oralReplacement})});
+    store=await new Store(directory,{env:{}}).load();let received,calls=0;server=createApp({store,automation:{busy:()=>false,startTask:(courseId,unitId,options)=>{calls++;received={courseId,unitId,options};return {id:'fixture',status:'waiting'};}},port:0,accessToken});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const base=`http://127.0.0.1:${server.address().port}`,replacement={entryKey:JSON.stringify(['unit4',['Getting the idea'],'Exercise 2']),recordingKey:'a'.repeat(64),draftKey:'b'.repeat(64)},send=(oralReplacement,origin=base)=>fetch(base+'/api/tasks',{method:'POST',headers:{...accessHeaders,'Content-Type':'application/json','X-UStudy':'1',Origin:origin},body:JSON.stringify({courseId:'book',unitId:'unit4',oralReplacement})});
     assert.equal((await send(replacement,'https://foreign.example.test')).status,403);assert.equal((await send({...replacement,draftKey:''})).status,400);assert.equal(calls,0);assert.equal((await send(replacement)).status,202);assert.deepEqual(received,{courseId:'book',unitId:'unit4',options:{oralReplacement:replacement}});
     const engine=new Automation(store);assert.throws(()=>engine.startTask('book','unit5',{oralReplacement:replacement}),/口语替换需要对应目录/);
   }finally{await server?.shutdown();await store?.flush();await rm(directory,{recursive:true,force:true});}

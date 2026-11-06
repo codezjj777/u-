@@ -8,6 +8,7 @@ import {readOralActivityFromDOM,loadOralStory,oralRecordingIdentity} from '../or
 import {saveLocalOralDraft} from '../oral-draft.mjs';
 import {Store} from '../store.mjs';
 import {createApp} from '../server.mjs';
+import {accessToken,authorizedDashboard} from './fixtures/local-access.mjs';
 import {oralTestWave,oralRetellHTML,oralSequenceHTML,oralRetelling,oralStory,oralPrompt,oralQuestion,oralQuestionDirections} from './fixtures/oral-retell.mjs';
 import {SHORT_ORAL_TEXT} from '../oral-short.mjs';
 
@@ -89,7 +90,7 @@ export async function oralBrowserCases(t,context,root){
       const entry={key:f.task.entryKey,title:'Exercise 2',path:['Active reading','Getting the idea'],required:true,pending:true,completed:false};f.engine.courseDirectory=async()=>({page:{}});f.engine.refreshTaskDirectory=async()=>{if(!f.page.isClosed())completed ||= await f.page.evaluate(()=>window.footerClicks>0);return {ready:true,activeUnitId:'unit4',entries:[{...entry,pending:!completed,completed}]};};
       f.engine.openRequiredEntry=async()=>{f.engine.taskPages.set(f.task.id,f.page);return f.page;};
       const lease=f.engine.operations.acquire('answer',{signal:controller.signal,timeoutMs:0});pending=f.engine.runtime.start(f.task,controller,()=>f.engine.runTask(f.task,{},f.settings,lease.signal),()=>lease.release());
-      server=createApp({store:f.store,automation:f.engine,port:0});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));base=`http://127.0.0.1:${server.address().port}`;route=route=>route.continue();await context.route(base+'/**',route);ui=await context.newPage();await ui.addInitScript(()=>localStorage.setItem('ustudy-demo','false'));await ui.goto(base);await ui.locator('[data-view="tasks"]').first().click();
+      server=createApp({store:f.store,automation:f.engine,port:0,accessToken});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));base=`http://127.0.0.1:${server.address().port}`;route=route=>route.continue();await context.route(base+'/**',route);ui=await context.newPage();await ui.addInitScript(()=>localStorage.setItem('ustudy-demo','false'));await ui.goto(authorizedDashboard(base));await ui.locator('[data-view="tasks"]').first().click();
       const retry=ui.locator('[data-task-action="replace-oral"]');await retry.waitFor({state:'visible'});assert.equal(f.task.status,'review');assert.equal(f.task.oralReview.ready,true);assert.equal(f.requests(),0);await retry.click();await pending;
       assert.equal(f.task.status,'completed',JSON.stringify(f.task.logs));assert.equal(f.task.answered,1);assert.equal(f.store.data.bank.length,0);assert.equal(f.task.oralRetryRequested,undefined);assert.equal(f.task.oralReview,undefined);assert.equal(completed,true);
     }finally{controller.abort();await pending?.catch(()=>{});await ui?.close();await server?.shutdown();if(base)await context.unroute(base+'/**',route);await f.cleanup();}

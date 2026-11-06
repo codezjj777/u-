@@ -1,4 +1,4 @@
-import {mkdir,readFile,writeFile,rename} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,rename,unlink} from 'node:fs/promises';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {EventEmitter} from 'node:events';
@@ -7,16 +7,23 @@ import {validateSettings} from './settings.mjs';
 import {emptyState,validateState,validateManualEntryMarks,SCHEMA_VERSION} from './state-schema.mjs';
 import {verifyBankImages} from './image-materials.mjs';
 import {APP_INFO} from './runtime-check.mjs';
+import {protectForCurrentUser,unprotectForCurrentUser,writePrivateFile} from './local-secrets.mjs';
 export {defaultSettings} from './settings.mjs';
 
 const bankName=/^bank-[a-f0-9]{64}\.json$/;
 const storageFailure=()=>Object.assign(new Error('数据未能保存到磁盘，请检查目录权限后重试。'),{status:507});
+const credentialFormat='windows-dpapi-v1';
+const credentialPurpose='AI credentials';
+const credentialFailure=()=>Object.assign(new Error(process.platform==='win32'
+  ?'无法加密保存 API Key。请检查当前 Windows 用户的密钥保护和 .runtime 目录权限后重试。'
+  :'本机加密保存仅支持 Windows。请通过 USTUDY_API_KEY 环境变量提供 Key。'),{status:507,code:'CREDENTIAL_STORAGE'});
+const removeLegacyTemporary=directory=>unlink(path.join(directory,'credentials.tmp')).catch(error=>{if(error.code!=='ENOENT')throw error;});
 
 export class Store extends EventEmitter {
   constructor(directory,{env=process.env}={}){
     super();this.directory=directory;this.data=emptyState();this.connected=false;this.windowOpen=false;this.syncing=false;this.operation=null;
     this.apiKey=(env.USTUDY_API_KEY||'').trim();this.envEndpoint=(env.USTUDY_API_ENDPOINT||'').trim();this.envModel=(env.USTUDY_API_MODEL||'').trim();
-    this.keyEndpoint='';this.keyVersion='legacy';this.writeQueue=Promise.resolve();this.saveTimer=null;this.storageError=null;this.revision=0;this.instanceId=randomUUID();this.bankCache=null;this.bankFileCache=null;
+    this.keyEndpoint='';this.keyVersion='legacy';this.writeQueue=Promise.resolve();this.saveTimer=null;this.storageError=null;this.credentialError=null;this.revision=0;this.instanceId=randomUUID();this.bankCache=null;this.bankFileCache=null;
   }
   async load(){
     await mkdir(this.directory,{recursive:true});let raw;
@@ -49,15 +56,36 @@ export class Store extends EventEmitter {
     this.keyEndpoint=this.data.settings.endpoint;this.keySource=this.apiKey?'environment':'none';
   }
   async loadLocalKey(){
-    if(this.keySource==='environment')return;
+    try{await removeLegacyTemporary(this.directory);}
+    catch{this.credentialError='无法清理旧版临时密钥文件，请检查 .runtime 目录权限。';return;}
     let file;
     try{file=JSON.parse(await readFile(path.join(this.directory,'credentials.json'),'utf8'));}
-    catch(error){if(error.code==='ENOENT')return;throw new Error('无法读取本地密钥文件，请检查 .runtime/credentials.json。');}
+    catch(error){if(error.code!=='ENOENT')this.credentialError='无法读取本地密钥文件，请检查目录权限或在设置中重新保存 Key。';return;}
+    const legacy=file?.format===undefined&&typeof file?.apiKey==='string';
+    if(this.keySource==='environment'&&!legacy)return;
+    if(legacy){
+      try{await this.writeCredentials(file);}
+      catch(error){this.credentialError=`旧版 API Key 未能迁移。${error.message}`;return;}
+    }else{
+      try{
+        if(file?.format!==credentialFormat)throw new Error('未知密钥格式');
+        file=JSON.parse(await unprotectForCurrentUser(file.protected,credentialPurpose));
+      }catch{this.credentialError='当前账号无法解密本地 API Key，请在答题设置中重新输入并保存。';return;}
+    }
+    if(this.keySource==='environment')return;
     const version=this.data.credentialVersion||'legacy';
-    const credentials=[file,...(Array.isArray(file.previous)?file.previous:[])].find(item=>(item.version||'legacy')===version);
-    if(!credentials){this.storageError='本地密钥与配置版本不一致，请在设置中重新保存 Key。';return;}
-    if(typeof credentials.apiKey!=='string'||!credentials.apiKey.trim()||credentials.apiKey.length>8192||!UStudy.validateEndpoint(credentials.endpoint))throw new Error('本地密钥文件格式无效，请重新保存 Key。');
-    this.apiKey=credentials.apiKey.trim();this.keyEndpoint=UStudy.validateEndpoint(credentials.endpoint);this.keySource='local';this.keyVersion=version;
+    const credentials=[file,...(Array.isArray(file?.previous)?file.previous:[])].find(item=>item&&(item.version||'legacy')===version);
+    if(!credentials){this.credentialError='本地密钥与配置版本不一致，请在设置中重新保存 Key。';return;}
+    const endpoint=UStudy.validateEndpoint(credentials.endpoint);
+    if(typeof credentials.apiKey!=='string'||!credentials.apiKey.trim()||credentials.apiKey.length>8192||!endpoint){this.credentialError='本地密钥格式无效，请在设置中重新保存 Key。';return;}
+    this.apiKey=credentials.apiKey.trim();this.keyEndpoint=endpoint;this.keySource='local';this.keyVersion=version;
+  }
+  async writeCredentials(credentials){
+    try{
+      const protectedData=await protectForCurrentUser(JSON.stringify(credentials),credentialPurpose);
+      await removeLegacyTemporary(this.directory);
+      await writePrivateFile(path.join(this.directory,'credentials.json'),JSON.stringify({format:credentialFormat,protected:protectedData}));
+    }catch{throw credentialFailure();}
   }
   getBankIndex(){
     if(this.bankCache?.bank!==this.data.bank)this.bankCache={bank:this.data.bank,index:UStudy.buildBankIndex(this.data.bank)};
@@ -102,13 +130,16 @@ export class Store extends EventEmitter {
       await this.persist(candidate);this.data=candidate;this.changed({persist:false});return {cleared,manualEntryCount:0};
     });
   }
-  publicState(){return {appInfo:APP_INFO,revision:this.revision,instanceId:this.instanceId,courses:this.data.courses,tasks:this.data.tasks,activity:this.data.activity,settings:this.data.settings,bankCount:this.data.bank.length,exerciseBankCount:this.data.bank.filter(row=>row.kind==='exercise').length,manualEntryCount:this.data.manualEntryMarks.length,lastSynced:this.data.lastSynced,syncCoverage:this.data.syncCoverage,connected:this.connected,windowOpen:this.windowOpen,syncing:this.syncing,operation:this.operation,keyPresent:!!this.apiKey,keySource:this.keySource||'none',storageError:this.storageError};}
+  publicState(){return {appInfo:APP_INFO,revision:this.revision,instanceId:this.instanceId,courses:this.data.courses,tasks:this.data.tasks,activity:this.data.activity,settings:this.data.settings,bankCount:this.data.bank.length,exerciseBankCount:this.data.bank.filter(row=>row.kind==='exercise').length,manualEntryCount:this.data.manualEntryMarks.length,lastSynced:this.data.lastSynced,syncCoverage:this.data.syncCoverage,connected:this.connected,windowOpen:this.windowOpen,syncing:this.syncing,operation:this.operation,keyPresent:!!this.apiKey,keySource:this.keySource||'none',storageError:this.storageError,credentialError:this.credentialError};}
   publish(){this.revision++;this.emit('state',this.publicState());}
   changed({persist=true}={}){
     this.publish();if(persist){clearTimeout(this.saveTimer);this.saveTimer=setTimeout(()=>{this.saveTimer=null;void this.save().catch(()=>{});},250);this.saveTimer.unref();}
   }
   enqueue(work){
-    const pending=this.writeQueue.then(work).catch(()=>{this.storageError=storageFailure().message;this.publish();this.emit('notice',{message:this.storageError});throw storageFailure();});
+    const pending=this.writeQueue.then(work).catch(error=>{
+      const failure=error?.code==='CREDENTIAL_STORAGE'?error:storageFailure();
+      this.storageError=failure.message;this.publish();this.emit('notice',{message:this.storageError});throw failure;
+    });
     this.writeQueue=pending.catch(()=>{});return pending;
   }
   async persist(data,{credentials}={}){
@@ -120,10 +151,7 @@ export class Store extends EventEmitter {
     }
     const {bank,...state}=data;
     await writeFile(path.join(this.directory,'state.tmp'),JSON.stringify({...state,schemaVersion:SCHEMA_VERSION,bankFile:name},null,2),'utf8');
-    if(credentials){
-      await writeFile(path.join(this.directory,'credentials.tmp'),JSON.stringify(credentials),{encoding:'utf8',mode:0o600});
-      await rename(path.join(this.directory,'credentials.tmp'),path.join(this.directory,'credentials.json'));
-    }
+    if(credentials)await this.writeCredentials(credentials);
     // state.json is the commit point. Staged credentials retain the previous
     // version, so a failure or crash before this rename keeps the old pair readable.
     await rename(path.join(this.directory,'state.tmp'),path.join(this.directory,'state.json'));
@@ -141,7 +169,7 @@ export class Store extends EventEmitter {
       const candidate={...this.data,settings:validatedSettings,bank:validatedBank,...(version?{credentialVersion:version}:{})};
       const credentials=apiKey?{apiKey:apiKey.trim(),endpoint:validatedSettings.endpoint,version,previous:this.keySource==='local'?[{apiKey:this.apiKey,endpoint:this.keyEndpoint,version:this.keyVersion}]:[]}:undefined;
       await this.persist(candidate,{credentials});this.data=candidate;
-      if(credentials){this.apiKey=credentials.apiKey;this.keyEndpoint=credentials.endpoint;this.keySource='local';this.keyVersion=version;}
+      if(credentials){this.apiKey=credentials.apiKey;this.keyEndpoint=credentials.endpoint;this.keySource='local';this.keyVersion=version;this.credentialError=null;}
       this.changed({persist:false});return this.publicState();
     });
   }

@@ -5,6 +5,7 @@ import path from 'node:path';
 import {Store} from '../store.mjs';
 import {Automation} from '../automation.mjs';
 import {createApp} from '../server.mjs';
+import {accessToken,accessHeaders} from './fixtures/local-access.mjs';
 
 const scope={courseId:'book-one',unitId:'unit-one',entryKey:JSON.stringify(['unit-one',['Reading in detail','Vocabulary'],'Phrases']),currentEntry:'Reading in detail / Vocabulary / Phrases'};
 async function fixture(t){
@@ -89,8 +90,8 @@ test('a failed disk write does not pretend that a manual mark was saved',async t
 
 test('clearing manual memory keeps local-origin protection and rejects active task and sync races',async t=>{
   const {store}=await fixture(t),{engine}=engineFor(store);await store.rememberManualEntry(scope,{});
-  const server=createApp({store,automation:engine,port:0});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>server.shutdown());
-  const base=`http://127.0.0.1:${server.address().port}`,send=(origin=base)=>fetch(base+'/api/manual-entries/clear',{method:'POST',headers:{'Content-Type':'application/json','X-UStudy':'1',Origin:origin},body:'{}'});
+  const server=createApp({store,automation:engine,port:0,accessToken});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>server.shutdown());
+  const base=`http://127.0.0.1:${server.address().port}`,send=(origin=base)=>fetch(base+'/api/manual-entries/clear',{method:'POST',headers:{...accessHeaders,'Content-Type':'application/json','X-UStudy':'1',Origin:origin},body:'{}'});
   assert.equal((await send('https://foreign.example.test')).status,403);
   store.data.tasks=[task()];assert.equal((await send()).status,409);store.data.tasks=[];
   store.syncing=true;assert.equal((await send()).status,409);store.syncing=false;

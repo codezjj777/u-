@@ -5,6 +5,7 @@ import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { Store } from '../store.mjs';
 import { createApp } from '../server.mjs';
+import {accessToken,authorizedDashboard} from './fixtures/local-access.mjs';
 import { OperationManager } from '../operation-manager.mjs';
 import { StudyTimeController } from '../study-time.mjs';
 import { StudyTimeBrowser, STUDY_TIME_HOME, sharedStudyTimeBrowserAccess } from '../study-time-browser.mjs';
@@ -55,7 +56,7 @@ test('semester study-time progress in the existing window', { timeout: 180000 },
   automation.operations = new OperationManager(operation => { store.operation = operation; store.changed({ persist: false }); });
   const browser = new StudyTimeBrowser(directory, { ...sharedStudyTimeBrowserAccess(automation), pollMs: 50 });
   const learning = new StudyTimeController({ directory: path.join(directory, 'study-time'), courses: () => store.data.courses, browser, pollMs: 1e8, now: () => wall });
-  const server = createApp({ store, automation, studyTime: learning, port: 0 }); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const server = createApp({ store, automation, studyTime: learning, port:0,accessToken}); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { await uiContext?.close(); await server.shutdown(); await context?.close(); await store.flush(); assert.ok(path.resolve(directory).startsWith(cache + path.sep)); await rm(directory, { recursive: true, force: true }); });
   await automation.ensureBrowser();
@@ -66,7 +67,7 @@ test('semester study-time progress in the existing window', { timeout: 180000 },
   await uiContext.route('**/*', route => route.request().url().startsWith(base + '/') ? route.continue() : route.abort()); await uiContext.addInitScript(() => localStorage.setItem('ustudy-demo', 'false'));
 
   await t.test('an active answer job prevents progress navigation and leaves unread values unknown', async () => {
-    dashboard = await uiContext.newPage(); dashboard.on('pageerror', error => errors.push(error.message)); await dashboard.goto(base);
+    dashboard = await uiContext.newPage(); dashboard.on('pageerror', error => errors.push(error.message)); await dashboard.goto(authorizedDashboard(base));
     await dashboard.locator('[data-study-time-card-progress="course-book0"]').filter({ hasText: '待读取平台时长' }).waitFor();
     assert.equal(context.pages().length, originalPageCount); assert.deepEqual(hits, []);
     await assert.rejects(learning.refreshProgress({ courseId: courses[0].id }), /自动答题/);

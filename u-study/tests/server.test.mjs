@@ -1,15 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import http from 'node:http';
 import {Store} from '../store.mjs';
 import {imageAsset} from '../image-materials.mjs';
 import {pictureBytes} from './fixtures/picture-exercise.mjs';
 import {createApp,validateSettings} from '../server.mjs';
+import {accessHeaders,accessToken} from './fixtures/local-access.mjs';
 const tmpRoot=path.resolve('.cache');
-async function fixture(t,{beforeShutdown,onShutdown,testConnection,inspectCurrentLesson,env={}}={}){const directory=await mkdtemp(path.join(tmpRoot,'test-store-'));const store=await new Store(directory,{env}).load();const automation={busy:()=>false,connect:async()=>({windowOpen:true}),startSync:()=>{store.syncing=true;},unitsForCourse:async(courseId,unitId)=>({courseId,activeUnitId:unitId||'unit4',units:[{id:'unit4',label:'Unit 4'}]}),startTask:(courseId,unitId)=>({id:'test-task',courseId,unitId,status:'waiting'}),controlTask:(id,action)=>({id,status:action==='pause'?'paused':'stopped'}),openCourse:async()=>({}),inspectCurrentLesson};const server=createApp({store,automation,port:0,beforeShutdown,onShutdown,testConnection});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const base=`http://127.0.0.1:${server.address().port}`;t.after(async()=>{await server.shutdown();await store.flush();await rm(directory,{recursive:true,force:true});});return {directory,store,base,post:(route,data,headers={})=>fetch(base+'/api'+route,{method:'POST',headers:{'Content-Type':'application/json','X-UStudy':'1',Origin:base,...headers},body:JSON.stringify(data)})};}
+async function fixture(t,{beforeShutdown,onShutdown,testConnection,inspectCurrentLesson,env={}}={}){const directory=await mkdtemp(path.join(tmpRoot,'test-store-'));const store=await new Store(directory,{env}).load();const automation={busy:()=>false,connect:async()=>({windowOpen:true}),startSync:()=>{store.syncing=true;},unitsForCourse:async(courseId,unitId)=>({courseId,activeUnitId:unitId||'unit4',units:[{id:'unit4',label:'Unit 4'}]}),startTask:(courseId,unitId)=>({id:'test-task',courseId,unitId,status:'waiting'}),controlTask:(id,action)=>({id,status:action==='pause'?'paused':'stopped'}),openCourse:async()=>({}),inspectCurrentLesson};const server=createApp({store,automation,port:0,beforeShutdown,onShutdown,testConnection,accessToken});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const base=`http://127.0.0.1:${server.address().port}`;t.after(async()=>{await server.shutdown();await store.flush();await rm(directory,{recursive:true,force:true});});return {directory,store,base,post:(route,data,headers={})=>fetch(base+'/api'+route,{method:'POST',headers:{...accessHeaders,'Content-Type':'application/json','X-UStudy':'1',Origin:base,...headers},body:JSON.stringify(data)})};}
 test('local API starts and serves complete UI assets',async t=>{const f=await fixture(t);assert.equal((await(await fetch(f.base+'/api/health')).json()).app,'u-study');const html=await(await fetch(f.base)).text();assert.match(html,/我的课程/);assert.equal((await fetch(f.base+'/styles.css')).status,200);});
+
+test('local API requires a bearer before reading private data or running an action',async t=>{
+  let exits=0;const f=await fixture(t,{onShutdown:()=>{exits++;}});
+  for(const route of ['/state','/bank/export','/events','/study-time/state','/study-time/diagnostics']){
+    assert.equal((await fetch(f.base+'/api'+route)).status,401);
+  }
+  for(const route of ['/sync','/settings','/shutdown','/study-time/window']){
+    assert.equal((await f.post(route,{}, {Authorization:`Bearer ${'z'.repeat(43)}`})).status,401);
+  }
+  assert.equal((await fetch(f.base+`/api/state?access=${accessToken}`)).status,401);
+  assert.equal(f.store.syncing,false);assert.equal(exits,0);
+  const health=await (await fetch(f.base+'/api/health')).text();
+  assert.equal(health.includes(accessToken),false);assert.equal(JSON.parse(health).localAuth,'bearer-v1');
+  assert.equal((await fetch(f.base+'/api/state',{headers:accessHeaders})).status,200);
+  const events=await fetch(f.base+'/api/events',{headers:accessHeaders});
+  assert.equal(events.status,200);assert.equal(events.headers.get('cache-control'),'no-store');await events.body.cancel();
+});
 
 test('current-lesson diagnostics accept only a scoped task id and retain local origin checks',async t=>{
   let calls=0;const f=await fixture(t,{inspectCurrentLesson:async input=>{calls++;assert.deepEqual(input,{taskId:'known-task'});return {ready:true,written:false,submitted:false,pages:[]};}});
@@ -17,7 +35,7 @@ test('current-lesson diagnostics accept only a scoped task id and retain local o
   assert.equal((await f.post('/lesson/inspect',{taskId:'https://evil.test'})).status,400);assert.equal(calls,0);
   const result=await f.post('/lesson/inspect',{taskId:'known-task'});assert.equal(result.status,200);assert.deepEqual(await result.json(),{ready:true,written:false,submitted:false,pages:[]});assert.equal(calls,1);
 });
-test('cross-site API writes and cross-site reads are rejected',async t=>{const f=await fixture(t);assert.equal((await f.post('/sync',{}, {Origin:'https://evil.test'})).status,403);assert.equal((await f.post('/sync',{}, {'X-UStudy':'0'})).status,403);assert.equal((await fetch(f.base+'/api/state',{headers:{'Sec-Fetch-Site':'cross-site'}})).status,403);});
+test('cross-site API writes and cross-origin local reads are rejected even with a token',async t=>{const f=await fixture(t);assert.equal((await f.post('/sync',{}, {Origin:'https://evil.test'})).status,403);assert.equal((await f.post('/sync',{}, {'X-UStudy':'0'})).status,403);assert.equal((await fetch(f.base+'/api/state',{headers:{...accessHeaders,'Sec-Fetch-Site':'cross-site'}})).status,403);assert.equal((await fetch(f.base+'/api/state',{headers:{...accessHeaders,Origin:f.base.replace('127.0.0.1','localhost')}})).status,403);});
 test('DNS rebinding Host and requests for private files are rejected',async t=>{const f=await fixture(t);const hostStatus=await new Promise((resolve,reject)=>{http.get(f.base+'/api/state',{headers:{Host:'attacker.test'}},res=>{res.resume();resolve(res.statusCode);}).on('error',reject);});assert.equal(hostStatus,403);assert.equal((await fetch(f.base+'/.runtime/state.json')).status,404);assert.equal((await fetch(f.base+'/..%5Cserver.mjs')).status,403);});
 test('environment key survives restart without being written or returned',async t=>{const env={USTUDY_API_KEY:'test-only-key-value',USTUDY_API_ENDPOINT:'https://api.example.test/v1/chat/completions',USTUDY_API_MODEL:'test-model'};const f=await fixture(t,{env});const s={...f.store.data.settings,aiEnabled:true};const response=await f.post('/settings',{settings:s,bank:[{question:'A sample question?',answer:'sample'}]});assert.equal(response.status,200);const returned=await response.text();assert.equal(returned.includes(env.USTUDY_API_KEY),false);assert.equal(JSON.parse(returned).keySource,'environment');const raw=await readFile(path.join(f.directory,'state.json'),'utf8');assert.equal(raw.includes(env.USTUDY_API_KEY),false);const loaded=await new Store(f.directory,{env}).load();assert.equal(loaded.apiKey,env.USTUDY_API_KEY);assert.equal(loaded.data.bank.length,1);const empty=await new Store(f.directory,{env:{}}).load();assert.equal(empty.apiKey,'');});
 test('changing provider cannot send the environment key to a different endpoint',async t=>{const f=await fixture(t,{env:{USTUDY_API_KEY:'old-test-key',USTUDY_API_ENDPOINT:'https://first.example.test/v1'}});const res=await f.post('/settings',{settings:{aiEnabled:true,endpoint:'https://second.example.test/v1',model:'b'}});assert.equal(res.status,400);assert.equal(f.store.data.settings.endpoint,'https://first.example.test/v1');assert.equal(f.store.apiKey,'old-test-key');});
@@ -83,16 +101,40 @@ test('browser key injection is rejected for saves and connection tests',async t=
   assert.equal(calls,0);assert.equal(f.store.apiKey,'environment-secret');
 });
 
-test('local key is persisted separately, restored on restart and never returned',async t=>{
+test('local key is encrypted, restored on restart and never returned',{skip:process.platform!=='win32'},async t=>{
   const f=await fixture(t),endpoint='https://local.example.test/v1/chat/completions',apiKey='local-development-secret';
   const saved=await f.post('/settings',{settings:{aiEnabled:true,endpoint,model:'test'},apiKey});assert.equal(saved.status,200);const publicState=await saved.json();assert.equal(publicState.keySource,'local');assert.equal(JSON.stringify(publicState).includes(apiKey),false);
   assert.equal((await readFile(path.join(f.directory,'state.json'),'utf8')).includes(apiKey),false);
-  const credentials=JSON.parse(await readFile(path.join(f.directory,'credentials.json'),'utf8'));assert.equal(credentials.apiKey,apiKey);assert.equal(credentials.endpoint,endpoint);
+  const raw=await readFile(path.join(f.directory,'credentials.json'),'utf8'),credentials=JSON.parse(raw);
+  assert.equal(credentials.format,'windows-dpapi-v1');assert.ok(credentials.protected);assert.equal(raw.includes(apiKey),false);assert.equal(raw.includes(endpoint),false);
   const next=await new Store(f.directory,{env:{}}).load();assert.equal(next.apiKey,apiKey);assert.equal(next.keySource,'local');assert.equal(next.keyEndpoint,endpoint);
   assert.equal((await fetch(f.base+'/.runtime/credentials.json')).status,404);
   assert.equal((await f.post('/settings',{settings:{aiEnabled:true,endpoint:'https://other.example.test/v1',model:'test'}})).status,400);
   assert.equal((await f.post('/settings',{settings:{aiEnabled:true,endpoint,model:'next'}})).status,200);assert.equal(f.store.apiKey,apiKey);
   const overridden=await new Store(f.directory,{env:{USTUDY_API_KEY:'environment-override'}}).load();assert.equal(overridden.apiKey,'environment-override');assert.equal(overridden.keySource,'environment');
+});
+
+test('legacy plaintext credentials migrate without using an uncommitted temp key',{skip:process.platform!=='win32'},async t=>{
+  const f=await fixture(t),endpoint='https://legacy.example.test/v1',apiKey='legacy-fixture-key';
+  await f.store.saveConfiguration({settings:{aiEnabled:false,endpoint,model:'existing-model'},bank:[{question:'Existing question?',answer:'existing answer'}]});
+  const file=path.join(f.directory,'credentials.json'),temporary=path.join(f.directory,'credentials.tmp');
+  await writeFile(file,JSON.stringify({endpoint,apiKey}));
+  await writeFile(temporary,JSON.stringify({endpoint,apiKey:'uncommitted-fixture-key'}));
+  const migrated=await new Store(f.directory,{env:{}}).load(),sealed=await readFile(file,'utf8');
+  assert.equal(migrated.apiKey,apiKey);assert.equal(migrated.keyEndpoint,endpoint);assert.equal(migrated.data.settings.model,'existing-model');assert.equal(migrated.data.bank.length,1);
+  assert.equal(JSON.parse(sealed).format,'windows-dpapi-v1');assert.equal(sealed.includes(apiKey),false);
+  await assert.rejects(readFile(temporary),{code:'ENOENT'});
+  assert.equal((await new Store(f.directory,{env:{}}).load()).apiKey,apiKey);
+});
+
+test('a damaged or foreign credential file leaves the data usable and can be replaced',{skip:process.platform!=='win32'},async t=>{
+  const f=await fixture(t),endpoint='https://local.example.test/v1',file=path.join(f.directory,'credentials.json');
+  await f.store.saveConfiguration({settings:{endpoint,model:'existing-model'}});
+  await writeFile(file,JSON.stringify({format:'windows-dpapi-v1',protected:'dGFtcGVyZWQ='}));
+  const next=await new Store(f.directory,{env:{}}).load();
+  assert.equal(next.apiKey,'');assert.equal(next.data.settings.model,'existing-model');assert.match(next.credentialError,/无法解密/);
+  await next.saveLocalKey('replacement-fixture-key',endpoint);assert.equal(next.credentialError,null);
+  assert.equal((await new Store(f.directory,{env:{}}).load()).apiKey,'replacement-fixture-key');
 });
 
 test('testing an unsaved local key never persists it or changes the active key',async t=>{
@@ -110,5 +152,5 @@ test('complete embedded-picture banks larger than 9 MB import and export without
   const f=await fixture(t),imageAssets=[1,2,3].map(seed=>imageAsset(pictureBytes(seed,{width:1024,height:1024,noise:true}),{width:1024,height:1024}));
   const bank=[{kind:'exercise',version:1,title:'Before you read',scope:{courseId:'pictures',unitId:'one',entryKey:'before'},pages:[{number:1,questions:[{question:'Describe the pictures and the title.',type:'text',options:[],context:'Look at the three pictures.',wordBank:[],blankOptions:[[]],fields:[{kind:'text'}],answer:['A complete sample description.'],images:imageAssets.map((asset,index)=>({digest:asset.digest,label:'Picture '+index}))}]}],imageAssets,verification:{method:'platform-all-correct',total:1,correct:1,unit:'questions',verifiedAt:1},learnedAt:1}];
   assert.ok(JSON.stringify(bank).length>9*1024*1024);const response=await f.post('/settings',{settings:f.store.data.settings,bank});assert.equal(response.status,200);assert.equal(f.store.data.bank.length,1);
-  const exported=await(await fetch(f.base+'/api/bank/export')).json();assert.equal(exported[0].imageAssets.length,3);assert.deepEqual(exported[0].imageAssets.map(image=>image.digest),imageAssets.map(image=>image.digest));assert.deepEqual(exported[0].imageAssets.map(image=>image.dataURL.length),imageAssets.map(image=>image.dataURL.length));const imported=await f.post('/settings',{settings:f.store.data.settings,bank:exported});assert.equal(imported.status,200);await f.store.flush();const reloaded=await new Store(f.directory,{env:{}}).load();assert.equal(reloaded.data.bank[0].imageAssets.length,3);await reloaded.flush();
+  const exported=await(await fetch(f.base+'/api/bank/export',{headers:accessHeaders})).json();assert.equal(exported[0].imageAssets.length,3);assert.deepEqual(exported[0].imageAssets.map(image=>image.digest),imageAssets.map(image=>image.digest));assert.deepEqual(exported[0].imageAssets.map(image=>image.dataURL.length),imageAssets.map(image=>image.dataURL.length));const imported=await f.post('/settings',{settings:f.store.data.settings,bank:exported});assert.equal(imported.status,200);await f.store.flush();const reloaded=await new Store(f.directory,{env:{}}).load();assert.equal(reloaded.data.bank[0].imageAssets.length,3);await reloaded.flush();
 });

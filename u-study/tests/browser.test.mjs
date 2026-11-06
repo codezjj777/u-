@@ -6,6 +6,7 @@ import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {chromium} from 'playwright-core';
 import {Store} from '../store.mjs';
 import {createApp} from '../server.mjs';
+import {accessToken,authorizedDashboard} from './fixtures/local-access.mjs';
 import {collectQuestionsFromDOM,readLearningStateFromDOM} from '../platform-dom.mjs';
 import {collectDirectoryFromDOM} from '../course-directory.mjs';
 import {fillQuestion} from '../answer-writer.mjs';
@@ -62,7 +63,7 @@ test('isolated real-browser integration',async t=>{
   const store=await new Store(path.join(directory,'data'),{env:{}}).load();
   const logs=Array.from({length:150},(_,i)=>({message:`Log ${i}: ${'x'.repeat(80)}`,timestamp:i+1,level:'info'}));
   store.data.tasks=Array.from({length:50},(_,i)=>({id:'task-'+i,status:i===0?'running':'completed',courseTitle:'Offline course',logs:logs.map(log=>({...log})),answered:0,pages:0}));
-  const server=createApp({store,automation:{busy:()=>false},port:0});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const server=createApp({store,automation:{busy:()=>false},port:0,accessToken});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const fixture=http.createServer((req,res)=>{res.setHeader('Content-Type','text/html; charset=utf-8');res.end(req.url==='/frame'?'<fieldset><legend>Fill the missing word.</legend><input type="text"></fieldset>':req.url==='/popup'?'<h1>Offline exercise popup</h1>':fixtureHTML);});
   await new Promise(resolve=>fixture.listen(0,'127.0.0.1',resolve));
   const base=`http://127.0.0.1:${server.address().port}`,fixtureBase=`http://127.0.0.1:${fixture.address().port}`;
@@ -80,9 +81,19 @@ test('isolated real-browser integration',async t=>{
       return url.startsWith(base+'/')||url.startsWith(fixtureBase+'/')?route.continue():route.abort();
     });
     await context.addInitScript(()=>localStorage.setItem('ustudy-demo','false'));
+    await t.test('only a launcher-authorized tab connects and authorization survives page reload',async()=>{
+      const page=await context.newPage();
+      try{
+        await page.goto(base);await page.getByText('请从启动器打开',{exact:true}).waitFor();
+        await page.goto('about:blank');
+        await page.goto(authorizedDashboard(base));await page.getByText('等待登录',{exact:true}).waitFor();
+        assert.equal(new URL(page.url()).hash,'');
+        await page.reload();await page.getByText('等待登录',{exact:true}).waitFor();
+      }finally{await page.close();}
+    });
     await t.test('large SSE histories stay connected, log nodes survive updates and reading focus is retained',async()=>{
       const page=await context.newPage(),errors=[];page.on('pageerror',error=>errors.push(error.message));
-      await page.goto(base);await page.locator('.task-live-log .log-line').first().waitFor({state:'attached'});
+      await page.goto(authorizedDashboard(base));await page.locator('.task-live-log .log-line').first().waitFor({state:'attached'});
       await page.locator('[data-view="tasks"]').first().click();
       await page.evaluate(()=>{const box=document.querySelector('.task-live-log');box.scrollTop=0;window.savedLog=box;window.savedLine=box.firstElementChild;});
       await page.locator('[data-task-action="stop"]').focus();
@@ -98,7 +109,7 @@ test('isolated real-browser integration',async t=>{
       const exercise=Core.validateExercise({kind:'exercise',version:1,title:'Exported full exercise',scope:{courseId:'book',unitId:'unit',entryKey:'leaf'},pages:[{number:1,questions:[{question:'Write both answers.',type:'text',options:[],context:'Complete exported material.',wordBank:['first','second'],blankOptions:[[],[]],fields:[{kind:'text'},{kind:'text'}],answer:['first','second']}]}],verification:{method:'platform-all-correct',total:2,correct:2,unit:'blanks',verifiedAt:1},learnedAt:1});
       store.data.bank=[exercise];store.changed({persist:false});const page=await context.newPage();
       try{
-        await page.goto(base);await page.locator('button[data-action="settings"]').first().click();
+        await page.goto(authorizedDashboard(base));await page.locator('button[data-action="settings"]').first().click();
         await page.locator('#export-bank').waitFor({state:'visible'});
         assert.match(await page.locator('#bank-status').textContent(),/1.*1/);
         const completed=page.waitForEvent('download');await page.locator('#export-bank').click();const download=await completed;

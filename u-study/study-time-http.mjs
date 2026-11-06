@@ -1,5 +1,4 @@
-// Called only after the existing local server has checked Host, Origin,
-// Sec-Fetch-Site and X-UStudy. It handles this feature's namespace exclusively.
+// The local server authenticates the request before dispatching this namespace.
 async function input(req) {
   let size = 0; const chunks = [];
   for await (const chunk of req) {

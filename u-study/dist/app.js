@@ -49,6 +49,7 @@
   const defaults = {aiEnabled:false,endpoint:'',model:'',autoSubmit:false,oralMode:'short',questionSelector:'',nextSelector:'',submitSelector:''};
   let state = {courses:[],tasks:[],activity:[],settings:{...defaults},bankCount:0,connected:false,syncing:false,keyPresent:false};
   let apiAvailable = false, demo = localStorage.getItem('ustudy-demo') !== 'false', filter = 'all', layout = localStorage.getItem('ustudy-layout') || 'grid', view = 'courses', demoTask = null, demoTimer = null, toastTimer;
+  let apiAccessRequired = false;
   let pendingBank = null, courseOptionsKey = '', manualEntriesClearing=false, bankExporting=false;
   let unitCatalog=null,unitsLoading=false,unitOptionsKey='',unitError='';
   let taskStarting=false,progressRefreshInFlight=false;
@@ -96,21 +97,25 @@
     const manualCount=state.manualEntryCount||0;
     $('#manual-entry-status').textContent=`已记住 ${manualCount} 个待手动项目`;
     $('#clear-manual-entries').disabled=demo||manualEntriesClearing||!apiAvailable||!manualCount||!!state.operation||state.syncing||state.tasks.some(task=>activeStatuses.has(task.status));
-    const message=state.storageError||state.operation?.label||'';
-    $('#system-status').hidden=!message;$('#system-status').textContent=message;$('#system-status').dataset.error=String(!!state.storageError);
-    $('#connection-state').innerHTML=`<span class="status-dot ${!apiAvailable||demo||!state.connected?'amber':''}"></span>${!apiAvailable?'本地服务重连中':demo?'演示模式':state.connected?'U校园已连接':'等待登录'}`;
-    $('#settings-service-state').textContent=apiAvailable?'本地服务已连接':'本地服务连接中…';
+    const error=state.storageError||state.credentialError;
+    const message=error||state.operation?.label||'';
+    const launchHint='请双击「一键启动.cmd」重新打开工作台。';
+    $('#system-status').hidden=!message;$('#system-status').textContent=message;$('#system-status').dataset.error=String(!!error);
+    $('#connection-state').innerHTML=`<span class="status-dot ${!apiAvailable||demo||!state.connected?'amber':''}"></span>${apiAccessRequired?'请从启动器打开':!apiAvailable?'本地服务重连中':demo?'演示模式':state.connected?'U校园已连接':'等待登录'}`;
+    $('#settings-service-state').textContent=apiAvailable?'本地服务已连接':apiAccessRequired?'本地访问未授权':'本地服务连接中…';
     $('#settings-service-state').dataset.connected=String(apiAvailable);
     $('#settings-service-note').hidden=apiAvailable;
-    $('#connector-detail').textContent=apiAvailable?state.windowOpen?'本地登录窗口已打开。登录完成后即可同步。':'本地服务已就绪。点击上方按钮打开登录窗口。':'正在自动重连本地服务，已填写的内容会保留。也可使用「重新连接」。';
+    $('#settings-service-message').textContent=apiAccessRequired?launchHint:'正在自动重连本地服务，已填写的内容会保留。';
+    $('#reconnect-service').hidden=apiAccessRequired;
+    $('#connector-detail').textContent=apiAvailable?state.windowOpen?'本地登录窗口已打开。登录完成后即可同步。':'本地服务已就绪。点击上方按钮打开登录窗口。':apiAccessRequired?launchHint:'正在自动重连本地服务，已填写的内容会保留。也可使用「重新连接」。';
   }
   function renderKeyStatus(){
     $('#api-key').disabled=state.keySource==='environment';
     $('#api-key').placeholder=state.keyPresent?'留空继续使用已保存的 Key':'输入 API Key，保存后重启仍可使用';
-    $('#api-key-status').textContent=state.keyPresent?(state.keySource==='environment'?'正在使用环境变量 Key':state.keySource==='local'?'Key 已保存在本机，重启后自动恢复':'当前 Key 仅在旧服务内存中，新版需保存一次以保留到本机'):'开发阶段：保存到本机 .runtime/credentials.json，发布前再调整密钥管理';
+    $('#api-key-status').textContent=state.credentialError||(state.keyPresent?(state.keySource==='environment'?'正在使用环境变量 Key':'Key 已由当前 Windows 用户加密保存'):'保存后由当前 Windows 用户加密保护。');
   }
-  function handleServiceConnection(available){
-    apiAvailable=available;if(shutdownRequested){$('#connection-state').textContent=shutdownComplete?'程序已退出':'正在安全退出';return;}renderServiceStatus();
+  function handleServiceConnection(available,accessRequired){
+    apiAvailable=available;apiAccessRequired=accessRequired;if(shutdownRequested){$('#connection-state').textContent=shutdownComplete?'程序已退出':'正在安全退出';return;}renderServiceStatus();
     if(available){
       if(settingsServiceError){$('#settings-error').hidden=true;settingsServiceError=false;}
       if(aiServiceError){$('#ai-test-result').hidden=true;aiServiceError=false;}

@@ -9,6 +9,7 @@ import { StudyTimeController } from '../study-time.mjs';
 import { readStudyTimePageFromDOM, collectStudyTimeDirectoryFromDOM, collectStudyTimeCoursesFromDOM, studyCredit } from '../study-time-dom.mjs';
 import { Store } from '../store.mjs';
 import { createApp } from '../server.mjs';
+import {accessToken,authorizedDashboard} from './fixtures/local-access.mjs';
 
 const cache = path.resolve('.cache'); await mkdir(cache, { recursive: true });
 const fixtureBase = 'https://ucontent.unipus.cn/offline-study-time';
@@ -73,7 +74,7 @@ test('shared-window study-time browser and dashboard', { timeout: 180000 }, asyn
   const browser = new StudyTimeBrowser(path.join(directory, 'study-time'), { ...sharedStudyTimeBrowserAccess(automation), pollMs: 50 });
   const learning = new StudyTimeController({ directory: path.join(directory, 'study-time'), courses: () => store.data.courses, browser, pollMs: 1e8, gradePollMs: 50 });
   browser.onLost = () => learning.disconnected();
-  const server = createApp({ store, automation, studyTime: learning, port: 0 }); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const server = createApp({ store, automation, studyTime: learning, port:0,accessToken}); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { await uiContext?.close(); await server.shutdown(); await automation.context?.close(); await store.flush(); assert.ok(path.resolve(directory).startsWith(cache + path.sep)); await rm(directory, { recursive: true, force: true }); });
   uiContext = await chromium.launchPersistentContext(path.join(directory, 'ui-browser'), { channel: process.env.USTUDY_TEST_BROWSER || 'msedge', headless: true, chromiumSandbox: true, viewport: { width: 1440, height: 1080 }, timeout: 20000 });
@@ -115,7 +116,7 @@ test('shared-window study-time browser and dashboard', { timeout: 180000 }, asyn
     report = await page.evaluate(readStudyTimePageFromDOM); assert.equal(report.notices.length, 0); await page.close();
   });
   await t.test('the card and sidebar open a separate workspace and leave the original answer selection untouched', async () => {
-    dashboard = await uiContext.newPage(); dashboard.on('pageerror', error => errors.push(error.message)); await dashboard.goto(base);
+    dashboard = await uiContext.newPage(); dashboard.on('pageerror', error => errors.push(error.message)); await dashboard.goto(authorizedDashboard(base));
     await dashboard.locator('[data-study-time-course-id="course-book2"]:enabled').waitFor();
     const originalSelection = await dashboard.locator('#task-course').inputValue();
     await dashboard.screenshot({ path: path.join(cache, 'study-time-cards.png'), fullPage: true });
@@ -304,7 +305,7 @@ test('shared-window study-time browser and dashboard', { timeout: 180000 }, asyn
       setTimeout(() => { observer.disconnect(); resolve(samples); }, 2400);
     }));
     const seconds = value => value.split(':').map(Number).reduce((total, part) => total * 60 + part, 0);
-    const info = await dashboard.evaluate(async () => { const state = await (await fetch('/api/study-time/state')).json(); return { hidden: document.hidden, clock: state.dwellClock, taskStatus: state.tasks[0]?.status }; });
+    const info = await dashboard.evaluate(async () => { const state = await (await UStudyService.fetchLocal('/study-time/state', {})).json(); return { hidden: document.hidden, clock: state.dwellClock, taskStatus: state.tasks[0]?.status }; });
     assert.ok(samples.length >= 3, JSON.stringify({ samples, info }));
     for (let index = 1; index < samples.length; index++) assert.equal(seconds(samples[index]) - seconds(samples[index - 1]), 1, JSON.stringify(samples));
     assert.equal(await dashboard.locator('#study-time-platform').innerText(), '00:00:00');
